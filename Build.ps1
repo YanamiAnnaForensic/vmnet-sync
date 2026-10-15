@@ -9,7 +9,7 @@ if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid VERSION.' }
 $rootFiles = @('Install.cmd','Uninstall.cmd','Status.cmd','Launcher.ps1','Install.ps1','Uninstall.ps1','Status.ps1',
     'Core.ps1','Sync.ps1','Audit.ps1','Setup.Common.ps1','VERSION','README.md','README.en.md','LICENSE','CHANGELOG.md')
 $runtimeFiles = $rootFiles + @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'docs') -File | ForEach-Object { 'docs/' + $_.Name })
-$sourceFiles = $runtimeFiles + @('Build.ps1','Test.ps1','Test-Worker.ps1','Test-Setup.ps1','Test-Package.ps1','.gitignore','.gitattributes',
+$sourceFiles = $runtimeFiles + @('Build.ps1','Test.ps1','Test-MultiNetwork.ps1','Test-Worker.ps1','Test-Setup.ps1','Test-Integration.ps1','Test-Package.ps1','.gitignore','.gitattributes',
     '.github/workflows/ci.yml','.github/workflows/release.yml','.github/ISSUE_TEMPLATE/bug_report.md')
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 if (-not (Test-Path -LiteralPath $output)) { [void](New-Item -ItemType Directory -Path $output) }

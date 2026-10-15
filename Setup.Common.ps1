@@ -66,9 +66,10 @@ function Wait-WorkerExit([string]$TaskName) {
 }
 
 function Assert-InstallManifest($Manifest, [string]$ConfigDirectory) {
-    if ($Manifest.TaskName -ne 'Vmnet8Sync-AfterConfigWrite' -or $Manifest.Version -ne 1 -or
+    if ($Manifest.TaskName -ne 'Vmnet8Sync-AfterConfigWrite' -or $Manifest.Version -notin @(1,2) -or
         $Manifest.ConfigDirectory -ine $ConfigDirectory -or $null -eq $Manifest.AuditEntries) { throw 'Unexpected installation manifest; refusing to overwrite it.' }
     $targets = @(Get-ConfigAuditTargets $ConfigDirectory)
+    if ($Manifest.Version -eq 1) { $targets = @($targets | Where-Object { -not $_.PSObject.Properties['Kind'] }) }
     if (@($Manifest.AuditEntries).Count -ne $targets.Count) { throw 'Incomplete installation manifest.' }
     foreach ($target in $targets) {
         $entries = @($Manifest.AuditEntries | Where-Object { $_.Path -ieq $target.Path })

@@ -14,12 +14,12 @@ function Test-Administrator {
 }
 
 function Get-ActualNetwork($Desired) {
-    $adapters = @(Get-NetAdapter -IncludeHidden | Where-Object { $_.InterfaceDescription -match '^VMware Virtual Ethernet Adapter for VMnet8$' })
-    $result = [ordered]@{ AdapterCount = $adapters.Count; Name = ''; Index = 0; Mac = ''; Status = ''; Addresses = @(); DhcpEnabled = $false; DirectRoute = $false; DefaultRoute = $false; ServicesRunning = $false }
+    $description = 'VMware Virtual Ethernet Adapter for ' + $Desired.Id
+    $adapters = @(Get-NetAdapter -IncludeHidden | Where-Object { $_.InterfaceDescription -ieq $description })
+    $result = [ordered]@{ Id=$Desired.Id; AdapterCount=$adapters.Count; Name=''; Index=0; Mac=''; Status=''; Addresses=@(); DhcpEnabled=$false; DirectRoute=$false; DefaultRoute=$false; ServicesRunning=$false }
     if ($adapters.Count -ne 1) { return [pscustomobject]$result }
     $adapter = $adapters[0]
-    $result.Name = $adapter.Name
-    $result.Index = $adapter.ifIndex
+    $result.Name = $adapter.Name; $result.Index = $adapter.ifIndex
     $result.Mac = $adapter.MacAddress.Replace('-', '').ToUpperInvariant()
     $result.Status = [string]$adapter.Status
     $result.Addresses = @(Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object IPAddress, PrefixLength, @{n='AddressState';e={[string]$_.AddressState}}, @{n='PrefixOrigin';e={[string]$_.PrefixOrigin}})
@@ -28,167 +28,195 @@ function Get-ActualNetwork($Desired) {
     $routes = @(Get-NetRoute -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue)
     $result.DirectRoute = @($routes | Where-Object { $_.DestinationPrefix -eq $Desired.Network -and $_.NextHop -eq '0.0.0.0' }).Count -gt 0
     $result.DefaultRoute = @($routes | Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' }).Count -gt 0
-    $services = @(Get-Service -Name 'VMnetDHCP', 'VMware NAT Service')
-    $result.ServicesRunning = @($services | Where-Object { $_.Status -ne 'Running' }).Count -eq 0
+    $names = @('VMnetDHCP')
+    if ($Desired.Kind -eq 'NAT') { $names += 'VMware NAT Service' }
+    $services = @(Get-Service -Name $names -ErrorAction SilentlyContinue)
+    $result.ServicesRunning = $services.Count -eq $names.Count -and @($services | Where-Object { $_.Status -ne 'Running' }).Count -eq 0
     return [pscustomobject]$result
 }
 
 function Invoke-AdapterRenew([string]$Alias, [int]$LimitMilliseconds) {
-    if ($Alias.Contains('"')) { throw 'Unsupported quote in adapter name.' }
+    if ($Alias -match '["*?]') { throw 'Unsupported quote or wildcard in adapter name.' }
     $info = New-Object Diagnostics.ProcessStartInfo
     $info.FileName = "$env:SystemRoot\System32\ipconfig.exe"
     $info.Arguments = '/renew "' + $Alias + '"'
-    $info.UseShellExecute = $false
-    $info.CreateNoWindow = $true
-    $info.RedirectStandardOutput = $true
-    $info.RedirectStandardError = $true
+    $info.UseShellExecute = $false; $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
     $process = [Diagnostics.Process]::Start($info)
     try {
-        $stdout = $process.StandardOutput.ReadToEndAsync()
-        $stderr = $process.StandardError.ReadToEndAsync()
+        $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($LimitMilliseconds)) {
-            $process.Kill()
-            $process.WaitForExit()
+            $process.Kill(); $process.WaitForExit()
             throw 'Targeted DHCP renewal timed out.'
         }
-        # ipconfig exit status is not proof of synchronization; always inspect the live adapter afterward.
-        return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $stdout.Result; Error = $stderr.Result }
+        return [pscustomobject]@{ ExitCode=$process.ExitCode; Output=$stdout.Result; Error=$stderr.Result }
     } finally { $process.Dispose() }
 }
 
-function Write-RunResult($Result) {
-    $json = $Result | ConvertTo-Json -Depth 8
-    Write-Output $json
-    if ($Mode -eq 'Repair') {
-        $directory = Join-Path $env:ProgramData 'Vmnet8Sync'
-        if (-not (Test-Path -LiteralPath $directory)) { [void](New-Item -ItemType Directory -Path $directory) }
-        # One bounded status file, rather than an ever-growing log.
-        $temporary = Join-Path $directory 'last-result.tmp'
-        [IO.File]::WriteAllText($temporary, $json)
-        $resultPath = Join-Path $directory 'last-result.json'
-        if ([IO.File]::Exists($resultPath)) { [IO.File]::Replace($temporary, $resultPath, $null) }
-        else { [IO.File]::Move($temporary, $resultPath) }
+function Restart-SharedDhcp {
+    $service = Get-Service -Name 'VMnetDHCP'
+    if ($service.Status -ne 'Running') { throw 'DHCP service is not running.' }
+    try {
+        $service.Stop(); $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(5))
+        $service.Start(); $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(5))
+    } finally {
+        $service.Refresh()
+        if ($service.Status -eq 'Stopped') { $service.Start() }
     }
 }
 
+function Read-ConfigBaseline {
+    return Read-ValidBaseline (Join-Path $env:ProgramData 'Vmnet8Sync\baseline.json')
+}
+
+function Save-ConfigBaseline($Snapshot) {
+    Write-JsonAtomic (Join-Path $env:ProgramData 'Vmnet8Sync\baseline.json') (New-ConfigBaseline $Snapshot)
+}
+
+function Update-EventAudit {
+    . "$PSScriptRoot\Audit.ps1"
+    Restore-ConfigAudit $ConfigDirectory
+}
+
+function Test-ConfigCurrent([string]$Fingerprint) {
+    try { return (Read-NetworkFiles $ConfigDirectory).Fingerprint -eq $Fingerprint } catch { return $false }
+}
+
+function Write-RunResult($Result) {
+    $Result | ConvertTo-Json -Depth 12 | Write-Output
+    # A queued duplicate must not erase the useful result of the actual edit.
+    if ($Mode -eq 'Repair' -and $Result.Status -ne 'NoChanges') { Write-JsonAtomic (Join-Path $env:ProgramData 'Vmnet8Sync\last-result.json') $Result }
+}
+
 function Save-RepairSnapshot($Actual) {
-    $directory = Join-Path $env:ProgramData 'Vmnet8Sync'
-    if (-not (Test-Path -LiteralPath $directory)) { [void](New-Item -ItemType Directory -Path $directory) }
-    [IO.File]::WriteAllText((Join-Path $directory 'before-repair.json'), ($Actual | ConvertTo-Json -Depth 8))
+    $script:beforeSnapshots[$Actual.Id] = $Actual
+    Write-JsonAtomic (Join-Path $env:ProgramData 'Vmnet8Sync\before-repair.json') @($script:beforeSnapshots.Values)
+}
+
+function Get-NetworkObservation($Desired) {
+    $actual = $null
+    if ($Desired.Disposition -eq 'Skipped') { $status='Skipped'; $reason=$Desired.Reason }
+    elseif ($Desired.Disposition -eq 'Blocked') { $status='NeedsAttention'; $reason=$Desired.Reason }
+    else {
+        try {
+            $actual = Get-ActualNetwork $Desired
+            $decision = Get-SyncDecision $Desired $actual
+            $status = if ($decision -eq 'Synced') { 'Synced' } else { 'NeedsAttention' }
+            $reason = $decision
+        } catch { $status='NeedsAttention'; $reason=$_.Exception.Message }
+    }
+    return [pscustomobject]@{ Id=$Desired.Id; Status=$status; Reason=$reason; Desired=$Desired; Actual=$actual }
 }
 
 function Invoke-Synchronization {
     if ($Mode -eq 'Check') {
-        $desired = Read-NetworkFiles $ConfigDirectory
-        $actual = Get-ActualNetwork $desired
-        $decision = Get-SyncDecision $desired $actual
-        Write-RunResult ([ordered]@{ Time = (Get-Date -Format o); Mode = 'Check'; Status = $decision; Desired = $desired; Actual = $actual; Changed = $false })
-        if ($decision -eq 'Synced') { return 0 }
-        return 2
+        $snapshot = Read-NetworkFiles $ConfigDirectory
+        $results = @($snapshot.Networks | Where-Object { $_.Disposition -ne 'Skipped' -or $_.Reason -ne 'Unused or bridged network' } | ForEach-Object { Get-NetworkObservation $_ })
+        $bad = @($results | Where-Object { $_.Status -eq 'NeedsAttention' }).Count -gt 0
+        $status = if ($bad) { 'NeedsAttention' } elseif (@($results | Where-Object { $_.Status -eq 'Synced' }).Count) { 'Synced' } else { 'Skipped' }
+        Write-RunResult ([ordered]@{ Time=(Get-Date -Format o); Mode='Check'; Status=$status; Networks=$results; Changed=$false })
+        if ($bad) { return 2 }; return 0
     }
     if (-not (Test-Administrator)) { throw 'Repair requires an elevated administrator terminal.' }
     $mutex = New-Object Threading.Mutex($false, 'Global\Vmnet8Sync.Worker')
     $ownsMutex = $false
     try {
-        try { $ownsMutex = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
+        try { $ownsMutex=$mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex=$true }
         if (-not $ownsMutex) { Write-Output '{"Status":"Another worker is active"}'; return 0 }
-        if ($EventMode) {
-            . "$PSScriptRoot\Audit.ps1"
-            Restore-ConfigAudit $ConfigDirectory
-        }
-        $auditedFingerprint = ''
+        $baseline = if ($EventMode) { Read-ConfigBaseline } else { $null }
+        if ($EventMode) { Update-EventAudit }
         $timer = [Diagnostics.Stopwatch]::StartNew()
-        $lastHash = ''
-        $stable = 0
-        $attempt = 0
-        $good = 0
+        $states = @{}; $script:beforeSnapshots=@{}
         $changes = New-Object 'Collections.Generic.List[string]'
-        $lastProblem = ''
-        $desired = $null
-        $actual = $null
+        $lastHash=''; $stable=0; $auditedHash=''; $dhcpRestarted=$false; $lastProblem='Configuration did not stabilize.'
+        $snapshot=$null; $completed=$false; $acknowledge=$false; $work=@()
         while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-            try { $desired = Read-NetworkFiles $ConfigDirectory }
-            catch { $lastProblem = $_.Exception.Message; $stable = 0; $good = 0; Start-Sleep -Seconds 1; continue }
-            if ($desired.Fingerprint -ne $lastHash) {
-                $lastHash = $desired.Fingerprint; $stable = 0; $attempt = 0; $good = 0
-            }
+            try { $snapshot=Read-NetworkFiles $ConfigDirectory }
+            catch { $lastProblem=$_.Exception.Message; $stable=0; Start-Sleep -Seconds 1; continue }
+            if ($snapshot.Fingerprint -ne $lastHash) { $lastHash=$snapshot.Fingerprint; $stable=0 }
             $stable++
             if ($stable -lt 4) { Start-Sleep -Seconds 1; continue }
-            if ($EventMode -and $auditedFingerprint -ne $desired.Fingerprint) {
-                Restore-ConfigAudit $ConfigDirectory
-                $auditedFingerprint = $desired.Fingerprint
+            if ($EventMode -and $auditedHash -ne $snapshot.Fingerprint) {
+                Update-EventAudit; $auditedHash=$snapshot.Fingerprint
             }
-            $actual = Get-ActualNetwork $desired
-            $decision = Get-SyncDecision $desired $actual
-            if ($decision -eq 'Synced') {
-                $good++
-                if ($good -ge 3) {
-                    Write-RunResult ([ordered]@{ Time = (Get-Date -Format o); Mode = 'Repair'; Status = 'Synced'; Desired = $desired; Actual = $actual; Changes = @($changes.ToArray()); ElapsedSeconds = [math]::Round($timer.Elapsed.TotalSeconds, 2) })
-                    return 0
+            $work = if ($EventMode) { @(Get-ChangedNetworks $snapshot $baseline) } else { @($snapshot.Networks) }
+            # A network touched earlier in this run must still be checked if the
+            # editor reverted it to the baseline while a renewal was in flight.
+            foreach ($id in @($states.Keys)) {
+                if (@($work | Where-Object { $_.Id -eq $id }).Count -eq 0) {
+                    $current = @($snapshot.Networks | Where-Object { $_.Id -eq $id })
+                    if ($current.Count) { $work += $current[0] }
+                    else { $work += [pscustomobject]@{ Id=$id; Kind='None'; Disposition='Skipped'; Reason='Network removed from VMware'; Fingerprint='Removed' } }
                 }
-                Start-Sleep -Seconds 1
-                continue
             }
-            $good = 0
-            $lastProblem = $decision
-            # The editor may briefly remove the adapter while applying a configuration.
-            if ($decision.StartsWith('Blocked:')) { Start-Sleep -Seconds 1; continue }
-            if ($attempt -ge 2) { Start-Sleep -Seconds 1; continue }
-            $remaining = [int](($TimeoutSeconds - $timer.Elapsed.TotalSeconds) * 1000)
-            if ($remaining -lt 5000) { break }
-            # Re-read before mutation: never repair against a superseded configuration.
-            $confirmation = Read-NetworkFiles $ConfigDirectory
-            if ($confirmation.Fingerprint -ne $desired.Fingerprint) { continue }
-            $live = Get-ActualNetwork $confirmation
-            if ((Get-SyncDecision $confirmation $live) -ne 'Repair') { continue }
-            if (-not $live.ServicesRunning) {
-                $lastProblem = 'Waiting for VMware services to finish applying settings.'
-                Start-Sleep -Seconds 1
-                continue
-            }
-            if ($attempt -eq 0) {
-                Save-RepairSnapshot $live
-            }
-            $attempt++
-            try {
-                if ($attempt -eq 2) {
-                    # A second renewal alone cannot fix a server still using stale settings.
-                    # Restart only DHCP. NAT is not restarted to repair a host DHCP lease.
-                    $service = Get-Service -Name 'VMnetDHCP'
-                    if ($service.Status -ne 'Running') { throw 'DHCP service is not running.' }
-                    if ($remaining -lt 16000) { break }
-                    try {
-                        $service.Stop()
-                        $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(5))
-                        $service.Start()
-                        $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(5))
-                    } finally {
-                        $service.Refresh()
-                        if ($service.Status -eq 'Stopped') { $service.Start() }
+            $refresh=$false
+            foreach ($desired in $work) {
+                if (-not $states.ContainsKey($desired.Id) -or $states[$desired.Id].Fingerprint -ne $desired.Fingerprint) {
+                    $states[$desired.Id]=[pscustomobject]@{ Fingerprint=$desired.Fingerprint; Attempt=0; Good=0; Done=$false; Result=$null }
+                }
+                $state=$states[$desired.Id]
+                $observation=Get-NetworkObservation $desired; $state.Result=$observation
+                if ($desired.Disposition -ne 'Ready') { $state.Done=$true; continue }
+                if ($observation.Status -eq 'Synced') { $state.Good++; $state.Done=($state.Good -ge 3); continue }
+                $state.Good=0; $state.Done=$false
+                $decision=$observation.Reason; $lastProblem=$decision
+                if ($decision -ne 'Repair' -or $state.Attempt -ge 2) { continue }
+                $remaining=[int](($TimeoutSeconds-$timer.Elapsed.TotalSeconds)*1000)
+                if ($remaining -lt 5000) { continue }
+                if (-not (Test-ConfigCurrent $snapshot.Fingerprint)) { $refresh=$true; break }
+                $live=Get-ActualNetwork $desired
+                if ((Get-SyncDecision $desired $live) -ne 'Repair' -or -not $live.ServicesRunning) { continue }
+                if ($state.Attempt -eq 0) { Save-RepairSnapshot $live }
+                $state.Attempt++
+                try {
+                    if ($state.Attempt -eq 2 -and -not $dhcpRestarted) {
+                        if ($remaining -lt 16000) { continue }
+                        # The service is shared. Never restart it more than once
+                        # per run, even when multiple networks need a second try.
+                        $dhcpRestarted=$true
+                        Restart-SharedDhcp
+                        $changes.Add('Restarted shared VMware DHCP service')
+                        foreach ($other in $states.Values) { $other.Good=0; $other.Done=$false }
                     }
-                    $changes.Add('Restarted VMware DHCP service (affects all VMware DHCP networks)')
-                }
-                if ((Read-NetworkFiles $ConfigDirectory).Fingerprint -ne $desired.Fingerprint) { continue }
-                $remaining = [math]::Min(15000, [int](($TimeoutSeconds - $timer.Elapsed.TotalSeconds) * 1000))
-                if ($remaining -lt 1000) { break }
-                $renewal = Invoke-AdapterRenew $live.Name $remaining
-                $changes.Add("Renewed DHCP on $($live.Name); ipconfig exit code $($renewal.ExitCode)")
-            } catch { $lastProblem = $_.Exception.Message }
-            Start-Sleep -Seconds 2
+                    if (-not (Test-ConfigCurrent $snapshot.Fingerprint)) { $refresh=$true; break }
+                    # Restart/Apply can replace an adapter: validate its identity again.
+                    $fresh=Get-ActualNetwork $desired
+                    if ((Get-SyncDecision $desired $fresh) -ne 'Repair' -or -not $fresh.ServicesRunning) { continue }
+                    $remaining=[math]::Min(15000,[int](($TimeoutSeconds-$timer.Elapsed.TotalSeconds)*1000))
+                    if ($remaining -lt 1000) { continue }
+                    $renewal=Invoke-AdapterRenew $fresh.Name $remaining
+                    $changes.Add("$($desired.Id): renewed DHCP on $($fresh.Name); exit code $($renewal.ExitCode)")
+                } catch { $state.Result.Reason=$_.Exception.Message; $lastProblem=$_.Exception.Message }
+            }
+            if ($refresh) { continue }
+            if (@($states.Values | Where-Object { -not $_.Done }).Count -eq 0) {
+                if (-not (Test-ConfigCurrent $snapshot.Fingerprint)) { continue }
+                $completed=$true; $acknowledge=$true; break
+            }
+            Start-Sleep -Seconds 1
         }
-        Write-RunResult ([ordered]@{ Time = (Get-Date -Format o); Mode = 'Repair'; Status = 'NeedsAttention'; Reason = $lastProblem; Desired = $desired; Actual = $actual; Changes = @($changes.ToArray()); ElapsedSeconds = [math]::Round($timer.Elapsed.TotalSeconds, 2) })
-        return 2
+        # Acknowledge a stable observed edit, including a failed one. An unrelated
+        # future edit must not silently retry a previously failed, unchanged VMnet.
+        if (-not $completed -and $stable -ge 4 -and $null -ne $snapshot) {
+            try { $acknowledge=((Read-NetworkFiles $ConfigDirectory).Fingerprint -eq $snapshot.Fingerprint) } catch { }
+        }
+        $results=@($states.Keys | Sort-Object | ForEach-Object { $state=$states[$_]; if ($null -ne $state.Result) { if (-not $state.Done -and $state.Result.Status -eq 'Synced') { $state.Result.Status='NeedsAttention'; $state.Result.Reason='Timed out before three successful observations' }; $state.Result } })
+        $bad=-not $completed -or @($results | Where-Object { $_.Status -eq 'NeedsAttention' }).Count -gt 0
+        $reasons=@($results | Where-Object { $_.Status -eq 'NeedsAttention' } | ForEach-Object { "$($_.Id): $($_.Reason)" })
+        if ($reasons.Count) { $lastProblem=$reasons -join '; ' }
+        $status=if ($bad) { 'NeedsAttention' } elseif ($results.Count -eq 0) { 'NoChanges' } elseif (@($results | Where-Object { $_.Status -eq 'Synced' }).Count) { 'Synced' } else { 'Skipped' }
+        if ($acknowledge) { Save-ConfigBaseline $snapshot }
+        Write-RunResult ([ordered]@{ Time=(Get-Date -Format o); Mode='Repair'; Status=$status; Reason=$(if ($bad) { $lastProblem } else { '' }); Networks=$results; Changes=@($changes.ToArray()); ElapsedSeconds=[math]::Round($timer.Elapsed.TotalSeconds,2) })
+        if ($bad) { return 2 }; return 0
     } finally {
-        if ($ownsMutex) { $mutex.ReleaseMutex() }
-        $mutex.Dispose()
+        if ($ownsMutex) { $mutex.ReleaseMutex() }; $mutex.Dispose()
     }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    try { $code = Invoke-Synchronization; $numbers = @($code | Where-Object { $_ -is [int] }); $code | Where-Object { $_ -isnot [int] } | Write-Output; exit $numbers[-1] }
+    try { $code=Invoke-Synchronization; $numbers=@($code | Where-Object { $_ -is [int] }); $code | Where-Object { $_ -isnot [int] } | Write-Output; exit $numbers[-1] }
     catch {
         try { Write-RunResult ([ordered]@{ Time=(Get-Date -Format o); Mode=$Mode; Status='Error'; Reason=$_.Exception.Message }) } catch { }
-        Write-Error $_ -ErrorAction Continue
-        exit 1
+        Write-Error $_ -ErrorAction Continue; exit 1
     }
 }

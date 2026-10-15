@@ -4,10 +4,12 @@ param([switch]$Json)
 $ErrorActionPreference = 'Stop'
 $installation = Join-Path $env:ProgramFiles 'Vmnet8Sync\installation.json'
 $resultFile = Join-Path $env:ProgramData 'Vmnet8Sync\last-result.json'
+$baselineFile = Join-Path $env:ProgramData 'Vmnet8Sync\baseline.json'
 $status = [ordered]@{
     Installed = (Test-Path -LiteralPath $installation)
     Version = $null; TaskState = 'Not registered'; RunningInstances = $null
     EventOnly = $null; TaskInspectionError = $null; LastResult = $null
+    BaselinePresent = (Test-Path -LiteralPath $baselineFile)
 }
 if ($status.Installed) {
     $manifest = [IO.File]::ReadAllText($installation) | ConvertFrom-Json
@@ -36,6 +38,7 @@ Write-Host 'VMnet8 Sync' -ForegroundColor Cyan
 Write-Host "Installed: $($status.Installed)    Version: $($status.Version)"
 Write-Host "Task: $($status.TaskState)    Running workers: $($status.RunningInstances)"
 Write-Host "Event-only configuration: $($status.EventOnly)"
+Write-Host "Configuration baseline present: $($status.BaselinePresent)"
 if ($null -ne $status.TaskInspectionError) { Write-Host "Task inspection: $($status.TaskInspectionError)" -ForegroundColor Yellow }
 if ($null -eq $status.LastResult) {
     Write-Host 'No result yet. This is normal before the first network-configuration change.'

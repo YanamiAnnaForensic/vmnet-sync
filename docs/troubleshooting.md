@@ -1,49 +1,46 @@
 # 故障排查
 
-## 双击没有安装成功
+## 安装与升级
 
-先完整解压 ZIP，再运行 `Install.cmd` 并接受 UAC。脚本路径含空格或中文可以正常使用。安装不需要下载额外依赖。
+先完整解压 ZIP，再运行 Install.cmd 并接受 UAC。若 Windows 因下载标记阻止脚本，请确认来源后解除 ZIP 锁定、重新解压。AppLocker、WDAC 或组策略仍可能阻止脚本/审计，需要按本机策略处理。
 
-若文件带有 Internet 下载标记，且 Windows 阻止执行，可在确认来源后右键 ZIP → 属性 → 解除锁定，再重新解压。组织的 AppLocker、WDAC 或组策略仍可能阻止脚本或覆盖审计策略，需要管理员按本机策略处理。工具不会永久修改全局 PowerShell ExecutionPolicy。
+安装只建立配置基线，不修复已有不一致，也不启动工作进程。安装期间不要同时点 VMware“应用”。VMware 升级改变安装路径后，重跑 Install.cmd 以刷新保存进程过滤。重复安装支持从 0.1 迁移、恢复损坏基线；不会自动执行修复。
 
-失败时对话框会显示原因。需要完整错误位置时，在管理员 Windows PowerShell 中运行：
+## Ready、没有结果或访问被拒绝
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1
-```
+Ready / 就绪表示等待事件；不是常驻运行。首次修改前没有 last-result.json 正常。Status.cmd 请求管理员权限以读取 SYSTEM 任务，普通终端可能无权读取，会明确报告无法检查。
 
-## 显示 Ready / 就绪
+## 修改后没有同步
 
-这是正常状态：Windows 正在等待配置写入事件，产品工作程序没有运行。首次配置修改前不存在 `last-result.json` 也是正常的。安装完成不会进行额外修复。
-
-## 状态查看提示拒绝访问
-
-`Status.cmd` 会自动请求管理员权限以读取 SYSTEM 任务。直接执行 `Status.ps1` 时可用普通权限，但 Windows 可能拒绝读取该任务；此时会明确显示未能检查任务，不会假称没有运行实例。可在管理员终端重新运行。
-
-## 修改后仍不同步
-
-1. 用 VMware 网络编辑器修改 VMnet8 并点“应用”。只打开窗口或取消修改不会触发。
-2. 等待当前任务退出，再查看 `Status.cmd` 中最近状态。
-3. 若没有最近结果，在管理员终端检查任务及文件系统审计：
+1. 在 VMware 原虚拟网络编辑器修改目标网络并应用。
+2. 等待任务退出，用 Status.cmd 查看 Networks 中该 VMnet 的结果及 Reason。
+3. 若没有运行结果，管理员终端检查事件任务和两类成功审计：
 
 ```powershell
 Get-ScheduledTask -TaskName 'Vmnet8Sync-AfterConfigWrite'
 Get-ScheduledTaskInfo -TaskName 'Vmnet8Sync-AfterConfigWrite'
 auditpol.exe /get /subcategory:'{0cce921d-69ae-11d9-bed3-505054503030}'
+auditpol.exe /get /subcategory:'{0cce921e-69ae-11d9-bed3-505054503030}'
 ```
 
-可以重复运行 `Install.cmd` 刷新代码、任务和审计规则。VMware 升级改变了安装路径后，也需要重新安装本工具来更新进程路径过滤。
+`Skipped` 常见原因：未连接宿主机虚拟网卡、关闭 VMware DHCP、桥接或未使用网络。工具不会擅自恢复这些选项。
 
-`NeedsAttention` 的 `Reason` 会指出阻塞原因，例如静态地址、网卡禁用、MAC 不匹配、配置文件尚不一致或服务未运行。工具只自动处理 DHCP 管理的宿主机 VMnet8，不把手动静态设置改成 DHCP。
+`NeedsAttention` 常见原因：静态地址、禁用或缺失网卡、MAC 不符、默认路由、重叠子网、配置尚未一致、所需服务未运行。仅主机网络只依赖 DHCP 服务，NAT 网络同时要求 NAT 服务运行。
 
-## 地址一致但 SSH 连不上
+修改 VMnet1 不会顺带检查未变化的 VMnet8。失败变更会被记录并确认基线，因此后续修改其他网络不会重试旧失败。可以只读查看全部网络：
 
-`Synced` 只验证宿主机与 VMware 配置。仍需确认虚拟机网卡接入 VMnet8、客体 IP 与新子网一致、SSH 监听地址和防火墙规则正确。客体镜像中的原静态 IP 不会被本工具修改。
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Sync.ps1 -Mode Check
+```
 
-## 卸载后仍有文件
+若管理员明确决定修复所有符合条件的网络，可运行同一命令加 `-Mode Repair`（替换 Check）。它会定向续租，必要时短暂重启共享 VMware DHCP；不会覆盖静态地址。自动运行只处理发生变化的网络。
 
-最近诊断数据保留在 `%ProgramData%\Vmnet8Sync`，不会产生后台活动。卸载后的系统文件审计开关保持原值，新增文件审计规则已移除。如果程序目录中存在其他未知文件，卸载也会保留它们。
+## IP 一致但仍无法连接客体
 
-## 提交问题
+Synced 只验证宿主机配置、网卡、路由和所需服务。还需确认客体接入正确 VMnet，客体 IP 已进入相同子网，SSH 监听和防火墙正常。工具不修改检材中的静态 IP。
 
-提供 Windows、VMware 和本工具版本、复现步骤及最近状态。提交公开 issue 前清除诊断中的私有 IP、MAC、用户名和文件路径。源码包和用户发行包不携带本机运行结果。
+## 卸载和问题反馈
+
+卸载后最近诊断和基线保留在 ProgramData\Vmnet8Sync，不产生后台活动。全局文件系统/注册表审计策略保留；新增 SACL 和自动任务移除。程序目录中的未知文件也保留。
+
+反馈请注明 Windows/VMware/工具版本、受影响 VMnet、网络模式、DHCP/宿主机连接状态和复现步骤。公开前清除私有 IP、MAC、用户名、路径和截图中的敏感信息。

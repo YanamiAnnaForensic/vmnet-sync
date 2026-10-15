@@ -1,35 +1,49 @@
 # VMnet8 Sync
 
-An event-triggered helper for VMware Workstation on Windows. It checks whether the host VMnet8 adapter matches the NAT/DHCP configuration after a network configuration write, renews a stale DHCP lease when appropriate, and exits.
+An event-triggered VMware Workstation helper for Windows. Version 0.2.0 discovers configured VMnets, checks the corresponding host adapters after an edit, renews stale DHCP leases, verifies the results and exits.
 
 [中文说明](README.md)
 
+**0.2.0 is a preview with automated tests and real event-trigger validation using isolated configuration fixtures. Real cross-subnet renewal remains to be validated.** The legacy product, directory and task names remain for upgrade compatibility.
+
 ## Use
 
-1. Download the Windows x64 ZIP from Releases and extract the entire archive.
-2. Double-click **Install.cmd** and accept the administrator prompt.
-3. Change VMnet8 in VMware's Virtual Network Editor and click Apply as usual.
+1. Download the package artifact from a successful GitHub Actions run and extract the included `vmnet8-sync-0.2.0-windows-x64.zip`.
+2. Double-click **Install.cmd** and accept UAC. The same entry upgrades a 0.1 installation.
+3. Edit your network in VMware's original Virtual Network Editor and click Apply.
 
-Use **Status.cmd** for installation/task status and **Uninstall.cmd** to remove the helper. Setup and the status window request administrator access. Re-running Install.cmd upgrades or repairs the installation.
+**Status.cmd** shows task and per-network results. **Uninstall.cmd** removes the helper. Setup only snapshots desired configuration; it does not start a worker or inspect/repair live adapters.
 
-There is no resident product process or service, boot/logon trigger, timer, or scheduled catch-up run. Installing does not launch a worker. Windows Event Log and Task Scheduler provide the trigger; they still do some additional work. The PowerShell worker uses memory while running and releases its process working set on exit.
+## Scope
 
-## Compatibility and behavior
+- Windows 10/11 x64 and built-in Windows PowerShell 5.1; no additional runtime.
+- Host-only and NAT networks, including custom VMnet0–19, with a connected host adapter and VMware DHCP enabled.
+- Network IDs, host/gateway addresses and subnet prefixes are discovered rather than assumed. Windows adapter aliases may be renamed.
+- Host-only networks do not depend on the NAT service. Bridges, unused slots, disconnected host-adapter connections and DHCP-off networks are skipped.
+- Static Windows adapter settings, disabled/missing adapters, identity mismatches and unexpected default routes are not overwritten.
+- Each edited network is processed independently. An unrelated unchanged network is not inspected or repaired, even if its live address is stale.
 
-- Windows 10/11 x64, built-in Windows PowerShell 5.1; no extra runtime download.
-- VMware Workstation, VMnet8 IPv4 NAT, DHCP-managed host virtual adapter.
-- Configuration reads and administrator installation were verified with Workstation 17.6.3. Other versions need testing.
-- Renamed Windows adapters are supported: the helper matches the VMware device description and MAC.
-- It checks NAT/DHCP agreement, host IP/prefix, address state, on-link route and service status.
-- Repair renews only VMnet8. A second attempt may restart the **shared VMware DHCP service**, briefly affecting DHCP requests on other VMware networks.
-- It does not override static host configuration, change guest addresses, alter physical adapters or rewrite VMware files.
-- A normal run is bounded to about 90 seconds, with a two-minute task limit. Multiple write events can queue bounded serial checks.
+Read-only inspection of local VMnet1 and VMnet8 passed with Workstation 17.6.3. Real Apply → audit event → SYSTEM task → cross-subnet repair and other versions still require validation.
 
-`Synced` means the configuration, host address and on-link route match and VMware services are running. It does not prove all NAT rules were loaded or that guest SSH/DNS works. This **0.1.0 preview** still needs real cross-subnet repair and wider event-sequence validation.
+## Execution
 
-Setup enables system-wide File System success auditing and adds narrowly scoped SACL rules. Uninstall removes the tool-added rules and task but preserves the global audit policy, as other software may depend on it. Diagnostics remain in `%ProgramData%\Vmnet8Sync`; installed code is in `%ProgramFiles%\Vmnet8Sync`.
+There is no resident product process/service, timer, boot/logon check, catch-up run or installation-time repair. Windows File System/Registry auditing and Task Scheduler launch the worker on configuration writes, including registry-only setting edits. Reads do not trigger it. Windows infrastructure still has some additional overhead; PowerShell uses memory while the worker runs and exits afterward.
 
-The first result file appears only after a configuration-change event. A Ready task is waiting for an event, not a resident worker. A historical read-only measurement took about 5 seconds and peaked near 155 MB; this is not a native low-memory executable.
+The worker compares a per-network configuration baseline, debounces edits, rechecks configuration and adapter identity before mutation, and requires three successful observations. Shared VMware DHCP may be restarted at most once per run; this briefly affects DHCP requests on other VMware networks. NAT is not restarted. Failed edits are recorded and acknowledged so later unrelated edits do not retry them. Queued duplicate events exit without overwriting the last meaningful result.
+
+Normal timeout is about 90 seconds with a two-minute task limit. `Synced` verifies host IP/prefix, preferred address state, on-link route and required services; it does not prove guest SSH/DNS or every NAT rule works. Guest IPs, physical adapters and VMware configuration are not changed.
+
+## Diagnostics and setup
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Sync.ps1 -Mode Check
+```
+
+Check mode is read-only. Exit codes: 0 synchronized/skipped, 2 needs attention, 1 error. Explicit administrator `-Mode Repair` inspects all eligible networks; the automatic task uses `-EventMode` to select only edited networks.
+
+Installed code is in `%ProgramFiles%\Vmnet8Sync`. `%ProgramData%\Vmnet8Sync` retains a baseline, last result and pre-repair snapshot. A Ready task is waiting for an event. No result before the first edit is normal.
+
+Setup enables system-wide File System and Registry success auditing and adds scoped SACLs. Other existing SACLs may also begin producing events. Uninstall removes tool-added rules and task but preserves global audit policies and diagnostics. Upgrade supports rollback and migration from 0.1.
 
 ## Development
 
@@ -37,8 +51,9 @@ The first result file appears only after a configuration-change event. A Ready t
 .\Test-Worker.ps1
 .\Test-Setup.ps1
 .\Build.ps1
+.\Test-Package.ps1
 ```
 
-Tests mock system mutation. The build produces Windows and source ZIPs plus SHA256SUMS.txt. CI runs on Windows; a matching `v<VERSION>` tag publishes a prerelease. See [publishing](docs/publishing.md), [architecture](docs/architecture.md) and [troubleshooting](docs/troubleshooting.md).
+Tests mock system mutation. A separate local integration check verified real file-write (4663) and registry-write (4657) events, SYSTEM task execution, VMnet1/VMnet8 selection, worker exit and no wake-up on configuration reads, using isolated fixtures. It did not change real adapters or restart services; temporary configuration/tasks were removed and audit policy restored. See [architecture](docs/architecture.md), [troubleshooting](docs/troubleshooting.md) and [publishing](docs/publishing.md).
 
 MIT licensed. Not affiliated with VMware. No VMware binaries or private host diagnostics are distributed.

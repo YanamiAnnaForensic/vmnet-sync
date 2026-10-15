@@ -3,6 +3,7 @@
 *.log
 *.tmp
 installation.json
+baseline.json
 last-result.json
 before-repair.json
 task.xml

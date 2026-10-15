@@ -18,14 +18,22 @@ function Assert-Throws([scriptblock]$Body) {
 $script:configPath = Join-Path $testRoot 'config'
 $script:programPath = Join-Path $testRoot 'program'
 $script:dataPath = Join-Path $testRoot 'data'
+$script:registryPath = Join-Path $testRoot 'registry'
+[void](New-Item -ItemType Directory -Path $script:registryPath)
 $script:fakeTask = $null
 $script:policy = 2
+$script:registryPolicy = 2
 $script:registerFailure = $false
 $script:started = 0
 $script:acls = @{}
 $script:waits = 0
+. "$PSScriptRoot\Core.ps1"
+. "$PSScriptRoot\Audit.ps1"
+. "$PSScriptRoot\Setup.Common.ps1"
+function Get-VMnetRegistryRoot { return $script:registryPath }
 $mockCode = @'
-function Read-NetworkFiles { return [pscustomobject]@{} }
+function Read-NetworkFiles { return [pscustomobject]@{Fingerprint='fixture'; Networks=@()} }
+function Get-VMnetRegistryRoot { return $script:registryPath }
 function Get-NetworkEditors { return @('C:\VMware-Test\vmnetcfg.exe') }
 function Assert-ManagedDirectory($Path) {
     if (-not $Path.StartsWith($script:testRoot + '\')) { throw 'A test tried to access a real managed directory.' }
@@ -34,11 +42,17 @@ function New-ManagedDirectory($Path) { Assert-ManagedDirectory $Path; if (-not (
 function Initialize-AuditNative { }
 function Get-TestAuditFlags { return $script:policy }
 function Set-TestAuditFlags($Value) { $script:policy=[int]$Value }
+function Get-TestRegistryAuditFlags { return $script:registryPolicy }
+function Set-TestRegistryAuditFlags($Value) { $script:registryPolicy=[int]$Value }
 function Get-Acl($LiteralPath, [switch]$Audit) {
-    if (-not $script:acls.ContainsKey($LiteralPath)) { $script:acls[$LiteralPath]=[Security.AccessControl.FileSecurity]::new() }
+    if (-not $script:acls.ContainsKey($LiteralPath)) {
+        $script:acls[$LiteralPath]=if ($LiteralPath -eq $script:registryPath) { [Security.AccessControl.RegistrySecurity]::new() } else { [Security.AccessControl.FileSecurity]::new() }
+    }
     return $script:acls[$LiteralPath]
 }
 function Set-Acl($LiteralPath, $AclObject) { $script:acls[$LiteralPath]=$AclObject }
+function Get-ConfigAuditAcl($Target) { return Get-Acl -LiteralPath $Target.Path -Audit }
+function Set-ConfigAuditAcl($Target, $Acl) { Set-Acl -LiteralPath $Target.Path -AclObject $Acl }
 function Get-ScheduledTask($TaskName, $ErrorAction) { return $script:fakeTask }
 function Disable-ScheduledTask($TaskName) { $script:fakeTask.Settings.Enabled=$false }
 function Enable-ScheduledTask($TaskName, $ErrorAction) { $script:fakeTask.Settings.Enabled=$true }
@@ -62,6 +76,8 @@ function Write-FixtureScript([string]$Name) {
         @{Old="(Join-Path `$env:ProgramData 'VMware')"; New='($script:configPath)'},
         @{Old='[Vmnet8Sync.AuditNative]::GetFlags()'; New='(Get-TestAuditFlags)'},
         @{Old='[Vmnet8Sync.AuditNative]::SetFlags('; New='Set-TestAuditFlags ('},
+        @{Old='[Vmnet8Sync.AuditNative]::GetRegistryFlags()'; New='(Get-TestRegistryAuditFlags)'},
+        @{Old='[Vmnet8Sync.AuditNative]::SetRegistryFlags('; New='Set-TestRegistryAuditFlags ('},
         @{Old='Global\Vmnet8Sync.Setup'; New=('Local\Vmnet8Sync.Test.' + [Guid]::NewGuid().ToString('N'))}
     )) { $source=$source.Replace($assignment.Old,$assignment.New) }
     $source=$source.Replace('$ownsMutex = $false', ('$ownsMutex = $false' + "`r`n" + $mockCode))
@@ -79,12 +95,16 @@ try {
         . (Join-Path $fixture 'Install.ps1') | Out-Null
         Assert-Equal 0 $script:started
         Assert-Equal 3 $script:policy
+        Assert-Equal 3 $script:registryPolicy
         [xml]$xml=$script:fakeTask.Xml
         Assert-Equal 1 $xml.Task.Triggers.ChildNodes.Count
         Assert-Equal 'EventTrigger' $xml.Task.Triggers.FirstChild.Name
         $script:firstManifest=[IO.File]::ReadAllText((Join-Path $script:programPath 'installation.json')) | ConvertFrom-Json
         Assert-Equal 2 $script:firstManifest.OriginalAuditFlags
         Assert-Equal $script:releaseVersion $script:firstManifest.ProductVersion
+        Assert-Equal 2 $script:firstManifest.Version
+        Assert-Equal 4 @($script:firstManifest.AuditEntries).Count
+        Assert-Equal $true (Test-Path -LiteralPath (Join-Path $script:dataPath 'baseline.json'))
     }
     Test-Case 'Repeat install preserves the initial audit baseline and does not start a worker' {
         . (Join-Path $fixture 'Install.ps1') | Out-Null
@@ -98,11 +118,13 @@ try {
     Test-Case 'Failed upgrade restores installed files, manifest and the previously enabled task' {
         $before=[IO.File]::ReadAllText((Join-Path $script:programPath 'VERSION'))
         $manifestBefore=[IO.File]::ReadAllText((Join-Path $script:programPath 'installation.json'))
+        $baselineBefore=[IO.File]::ReadAllText((Join-Path $script:dataPath 'baseline.json'))
         [IO.File]::WriteAllText((Join-Path $fixture 'VERSION'),'0.2.0')
         $script:registerFailure=$true
         Assert-Throws { . (Join-Path $fixture 'Install.ps1') }
         Assert-Equal $before ([IO.File]::ReadAllText((Join-Path $script:programPath 'VERSION')))
         Assert-Equal $manifestBefore ([IO.File]::ReadAllText((Join-Path $script:programPath 'installation.json')))
+        Assert-Equal $baselineBefore ([IO.File]::ReadAllText((Join-Path $script:dataPath 'baseline.json')))
         Assert-Equal $true $script:fakeTask.Settings.Enabled
         Assert-Equal 0 $script:started
     }
@@ -112,6 +134,33 @@ try {
         $bad=[IO.File]::ReadAllText((Join-Path $script:programPath 'installation.json')) | ConvertFrom-Json
         $bad.AuditEntries[0].Path='C:\unrelated'
         Assert-Throws { Assert-InstallManifest $bad $script:configPath }
+    }
+    Test-Case 'Version 0.1 manifest migrates from file-only auditing without losing original rights' {
+        $legacy=[IO.File]::ReadAllText((Join-Path $script:programPath 'installation.json')) | ConvertFrom-Json
+        $legacy.Version=1; $legacy.ProductVersion='0.1.0'
+        $legacy.AuditEntries=@($legacy.AuditEntries | Where-Object { $_.Path -ne $script:registryPath })
+        [IO.File]::WriteAllText((Join-Path $script:programPath 'installation.json'),($legacy | ConvertTo-Json -Depth 8))
+        # Model a true v1 installation: no registry SACL, no registry success audit.
+        $script:acls[$script:registryPath]=[Security.AccessControl.RegistrySecurity]::new()
+        $script:registryPolicy=2
+        Assert-InstallManifest $legacy $script:configPath
+        . (Join-Path $fixture 'Install.ps1') | Out-Null
+        $upgraded=[IO.File]::ReadAllText((Join-Path $script:programPath 'installation.json')) | ConvertFrom-Json
+        Assert-Equal 2 $upgraded.Version
+        Assert-Equal 4 @($upgraded.AuditEntries).Count
+        Assert-Equal $legacy.AuditEntries[0].AddedRights $upgraded.AuditEntries[0].AddedRights
+        Assert-Equal 3 $script:registryPolicy; Assert-Equal 0 $script:started
+    }
+    Test-Case 'Manifest cannot add arbitrary registry cleanup targets' {
+        $bad=[IO.File]::ReadAllText((Join-Path $script:programPath 'installation.json')) | ConvertFrom-Json
+        $bad.AuditEntries[3].Path='HKLM:\SOFTWARE\Unrelated'
+        Assert-Throws { Assert-InstallManifest $bad $script:configPath }
+    }
+    Test-Case 'Reinstall recovers a damaged baseline without starting a worker' {
+        [IO.File]::WriteAllText((Join-Path $script:dataPath 'baseline.json'),'invalid json')
+        . (Join-Path $fixture 'Install.ps1') | Out-Null
+        Assert-Equal 2 (Read-ValidBaseline (Join-Path $script:dataPath 'baseline.json')).Version
+        Assert-Equal 0 $script:started
     }
     Test-Case 'Uninstall removes known product files and task, retains diagnostics and audit policy' {
         Write-FixtureScript 'Uninstall.ps1'

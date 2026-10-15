@@ -23,12 +23,14 @@ try {
             if (@($names | Sort-Object -Unique).Count -ne $names.Count) { throw 'Duplicate ZIP entry.' }
             foreach ($name in $names) {
                 if (-not $name.StartsWith("vmnet8-sync-$version/") -or $name.Contains('..') -or $name.Contains('\')) { throw "Unsafe ZIP entry: $name" }
-                if ($name -match '/(?:installation\.json|last-result\.json|before-repair\.json|task\.xml|\.git/|[^/]*\.log)$') { throw "Private/runtime file in package: $name" }
+                if ($name -match '/(?:installation\.json|baseline\.json|last-result\.json|before-repair\.json|task\.xml|\.git/|[^/]*\.log)$') { throw "Private/runtime file in package: $name" }
             }
             foreach ($required in @('Install.cmd','Uninstall.cmd','Status.cmd','Launcher.ps1','Install.ps1','Uninstall.ps1','Status.ps1','Core.ps1','Sync.ps1','Audit.ps1','Setup.Common.ps1','VERSION','LICENSE','README.md')) {
                 if ("vmnet8-sync-$version/$required" -notin $names) { throw "Missing package file: $required" }
             }
             if ($kind -eq 'source' -and "vmnet8-sync-$version/.github/workflows/ci.yml" -notin $names) { throw 'Source archive lost hidden .github files.' }
+            if ($kind -eq 'source' -and "vmnet8-sync-$version/Test-MultiNetwork.ps1" -notin $names) { throw 'Source archive lost multi-network tests.' }
+            if ($kind -eq 'source' -and "vmnet8-sync-$version/Test-Integration.ps1" -notin $names) { throw 'Source archive lost optional integration tests.' }
         } finally { $archive.Dispose() }
     }
     [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $output "vmnet8-sync-$version-source.zip"),$unpack)

@@ -2,6 +2,8 @@
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\Core.ps1"
 . "$PSScriptRoot\Audit.ps1"
+# Tests also run on CI hosts without VMware. No registry access is required.
+function Get-VMnetRegistryRoot { return 'HKLM:\SOFTWARE\WOW6432Node\VMware, Inc.\VMnetLib\VMnetConfig' }
 $script:passed = 0
 function Test-Case([string]$Name, [scriptblock]$Body) {
     & $Body
@@ -132,7 +134,7 @@ Test-Case 'Existing audit rights are preserved through add/remove' {
 Test-Case 'Task filters configuration writes and VMware replacement, not DHCP lease rotation' {
     [xml]$taskXml=New-SyncTaskXml 'C:\ProgramData\VMware' 'C:\Program Files\Vmnet8Sync\Sync.ps1' @('C:\VMware-Test\vmnetcfg.exe')
     [xml]$query=$taskXml.Task.Triggers.EventTrigger.Subscription
-    $eventXPath=$query.QueryList.Query.Select.InnerText
+    $eventXPath=$query.QueryList.Query.Select[0].InnerText
     # band() is a Windows Event Log XPath extension, unavailable in XmlDocument.
     # Validate path/process matching here, and let the Windows engine compile
     # the complete expression in the following test.
@@ -180,7 +182,7 @@ Test-Case 'Windows Event Log accepts the write-only event query including band e
     [xml]$taskXml=New-SyncTaskXml 'C:\ProgramData\VMware' 'C:\Program Files\Vmnet8Sync\Sync.ps1' @('C:\VMware-Test\vmnetcfg.exe')
     [xml]$query=$taskXml.Task.Triggers.EventTrigger.Subscription
     # Validate on the readable Application log; no Security-log access or writes.
-    $eventQuery=[Diagnostics.Eventing.Reader.EventLogQuery]::new('Application', [Diagnostics.Eventing.Reader.PathType]::LogName, $query.QueryList.Query.Select.InnerText)
+    $eventQuery=[Diagnostics.Eventing.Reader.EventLogQuery]::new('Application', [Diagnostics.Eventing.Reader.PathType]::LogName, $query.OuterXml.Replace('Path="Security"', 'Path="Application"').Replace("Path='Security'", "Path='Application'"))
     $reader=[Diagnostics.Eventing.Reader.EventLogReader]::new($eventQuery)
     try { $entry=$reader.ReadEvent(); if ($null -ne $entry) { $entry.Dispose() } }
     finally { $reader.Dispose() }

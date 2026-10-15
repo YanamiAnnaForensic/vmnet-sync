@@ -10,7 +10,9 @@ assignees: ''
 - Windows version:
 - VMware Workstation version:
 - VMnet8 Sync version:
-- Host VMnet8 uses DHCP or static IP:
+- Affected VMnet ID and mode (NAT / host-only):
+- Connect host virtual adapter enabled:
+- VMware DHCP enabled; Windows adapter uses DHCP or static IP:
 
 **Steps and expected result / 复现步骤与预期**
 

@@ -28,6 +28,9 @@ $taskDisabled = $false
 $auditChanged = $false
 $policyChanged = $false
 $oldFlags = $null
+$oldRegistryFlags = $null
+$registryPolicyChanged = $false
+$savedBaseline = $null
 $entries = @()
 $newRights = @()
 $filesChanged = $false
@@ -36,7 +39,7 @@ $ownsMutex = $false
 try {
     try { $ownsMutex = $setupMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
     if (-not $ownsMutex) { throw 'Another install or uninstall is running.' }
-    [void](Read-NetworkFiles $config)
+    $initialSnapshot = Read-NetworkFiles $config
     $editors = @(Get-NetworkEditors)
     foreach ($name in $runtimeFiles) {
         if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name) -PathType Leaf)) { throw "Package is incomplete: $name. Extract the full ZIP first." }
@@ -55,12 +58,17 @@ try {
     if ($oldTask -and $null -eq $previous) { throw "Task already exists without a matching manifest: $taskName" }
     Initialize-AuditNative
     $oldFlags = [Vmnet8Sync.AuditNative]::GetFlags()
+    $oldRegistryFlags = [Vmnet8Sync.AuditNative]::GetRegistryFlags()
     foreach ($target in @(Get-ConfigAuditTargets $config)) {
-        $acl = Get-Acl -LiteralPath $target.Path -Audit
         $rule = New-ConfigAuditRule $target
-        $added = [int]$target.Rights -band (-bnot (Get-ExistingAuditRights $acl $rule))
+        $existingRights = 0
+        if (Test-Path -LiteralPath $target.Path) { $existingRights = Get-ExistingAuditRights (Get-ConfigAuditAcl $target) $rule }
+        $added = [int]$target.Rights -band (-bnot $existingRights)
         $previousAdded = 0
-        if ($null -ne $previous) { $previousAdded = [int]@($previous.AuditEntries | Where-Object { $_.Path -ieq $target.Path })[0].AddedRights }
+        if ($null -ne $previous) {
+            $oldEntries = @($previous.AuditEntries | Where-Object { $_.Path -ieq $target.Path })
+            if ($oldEntries.Count -eq 1) { $previousAdded = [int]$oldEntries[0].AddedRights }
+        }
         $newRights += [pscustomobject]@{ Path=$target.Path; AddedRights=$added }
         $entries += [pscustomobject]@{ Path=$target.Path; AddedRights=($previousAdded -bor $added) }
     }
@@ -73,6 +81,8 @@ try {
     }
     New-ManagedDirectory $destination
     New-ManagedDirectory $dataDirectory
+    $baselinePath = Join-Path $dataDirectory 'baseline.json'
+    if (Test-Path -LiteralPath $baselinePath) { $savedBaseline = [IO.File]::ReadAllBytes($baselinePath) }
     foreach ($name in ($runtimeFiles + @('installation.json','task.xml'))) {
         $path = Join-Path $destination $name
         $savedFiles[$name] = if (Test-Path -LiteralPath $path) { [IO.File]::ReadAllBytes($path) } else { $null }
@@ -82,13 +92,24 @@ try {
         [IO.File]::WriteAllBytes((Join-Path $destination $name), [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot $name)))
     }
     $originalFlags = if ($null -ne $previous) { $previous.OriginalAuditFlags } else { $oldFlags }
-    $manifest = [ordered]@{ Version=1; ProductVersion=$version; Installed=(Get-Date -Format o); ConfigDirectory=$config; TaskName=$taskName; OriginalAuditFlags=$originalFlags; AuditEntries=$entries }
+    $originalRegistryFlags = if ($null -ne $previous -and $previous.PSObject.Properties['OriginalRegistryAuditFlags']) { $previous.OriginalRegistryAuditFlags } else { $oldRegistryFlags }
+    $manifest = [ordered]@{ Version=2; ProductVersion=$version; Installed=(Get-Date -Format o); ConfigDirectory=$config; TaskName=$taskName; OriginalAuditFlags=$originalFlags; OriginalRegistryAuditFlags=$originalRegistryFlags; AuditEntries=$entries }
     [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5))
     [Vmnet8Sync.AuditNative]::SetFlags(($oldFlags -band 3) -bor 1)
     $policyChanged = $true
     if (([Vmnet8Sync.AuditNative]::GetFlags() -band 1) -eq 0) { throw 'File System success auditing did not become active; check group policy.' }
+    [Vmnet8Sync.AuditNative]::SetRegistryFlags(($oldRegistryFlags -band 3) -bor 1)
+    $registryPolicyChanged = $true
+    if (([Vmnet8Sync.AuditNative]::GetRegistryFlags() -band 1) -eq 0) { throw 'Registry success auditing did not become active; check group policy.' }
     $auditChanged = $true
     Restore-ConfigAudit $config
+    $snapshot = Read-NetworkFiles $config
+    if ($snapshot.Fingerprint -ne $initialSnapshot.Fingerprint) { throw 'VMware configuration changed during installation. Finish applying network settings, then run setup again.' }
+    # Snapshot only: setup does not inspect or repair any live adapter.
+    # Preserve a v2 baseline during upgrades, including changes not processed yet.
+    $baselineValid=$false
+    if ($null -ne $savedBaseline) { try { [void](Read-ValidBaseline $baselinePath); $baselineValid=$true } catch { } }
+    if ($null -eq $previous -or $previous.Version -eq 1 -or -not $baselineValid) { Write-JsonAtomic $baselinePath (New-ConfigBaseline $snapshot) }
     $xml = New-SyncTaskXml $config (Join-Path $destination 'Sync.ps1') $editors
     [IO.File]::WriteAllText((Join-Path $destination 'task.xml'), $xml, [Text.Encoding]::Unicode)
     [void](Register-ScheduledTask -TaskName $taskName -Xml $xml -Force)
@@ -100,18 +121,14 @@ try {
     if ($newTaskRegistered) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Continue }
     if ($auditChanged) {
         foreach ($entry in $newRights) {
-            if ($entry.AddedRights -ne 0 -and (Test-Path -LiteralPath $entry.Path)) {
-                try {
-                    $target = [pscustomobject]@{ Path=$entry.Path; Rights=[Security.AccessControl.FileSystemRights]$entry.AddedRights }
-                    $acl = Get-Acl -LiteralPath $entry.Path -Audit
-                    [void]$acl.RemoveAuditRule((New-ConfigAuditRule $target))
-                    Set-Acl -LiteralPath $entry.Path -AclObject $acl
-                } catch { Write-Warning "Audit rollback: $($_.Exception.Message)" }
-            }
+            try { Remove-AddedConfigAudit $entry $config } catch { Write-Warning "Audit rollback: $($_.Exception.Message)" }
         }
     }
     if ($policyChanged) { [Vmnet8Sync.AuditNative]::SetFlags($oldFlags) }
+    if ($registryPolicyChanged) { [Vmnet8Sync.AuditNative]::SetRegistryFlags($oldRegistryFlags) }
     if ($filesChanged) {
+        if ($null -ne $savedBaseline) { [IO.File]::WriteAllBytes($baselinePath, $savedBaseline) }
+        elseif (Test-Path -LiteralPath $baselinePath) { Remove-Item -LiteralPath $baselinePath }
         foreach ($name in $savedFiles.Keys) {
             $path = Join-Path $destination $name
             if ($null -eq $savedFiles[$name]) { if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path } }

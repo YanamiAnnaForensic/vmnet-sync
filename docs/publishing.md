@@ -1,41 +1,10 @@
-# 上传 GitHub 与发布
+# 打包与发布
 
-## 第一次上传
+**当前 0.2.0 为预览版。源码推送后由 GitHub Actions 验证并生成可下载包；真实跨子网续租验收尚未完成，不能将预览版描述为完整端到端验证的稳定版。**
 
-源码 ZIP 是完整独立项目，不依赖原来的工作区。
+## 本地验证和打包
 
-1. 解压 `vmnet8-sync-0.1.0-source.zip`。
-2. 在 GitHub 创建仓库，建议名为 `vmnet8-sync`。
-3. 把解压后的**项目目录里的全部内容**上传到仓库根目录，包括 `.github`、`.gitignore` 和 `.gitattributes`。
-4. 仓库首页会使用 `README.md`。默认附带 MIT 许可证，可以在发布前根据自己的需求调整。
-
-也可以在解压后的项目目录使用 Git：
-
-```powershell
-git init
-git add .
-git commit -m "Initial release of VMnet8 Sync"
-git branch -M main
-# 将下面的地址替换为你创建的仓库地址。
-git remote add origin https://github.com/YOUR-NAME/vmnet8-sync.git
-git push -u origin main
-```
-
-## 发布给普通用户
-
-在 GitHub Releases 中创建版本 `v0.1.0`，勾选预发布，上传：
-
-- `vmnet8-sync-0.1.0-windows-x64.zip`：普通用户下载并双击安装。
-- `vmnet8-sync-0.1.0-source.zip`：包含测试、打包脚本和工作流的完整源码。
-- `SHA256SUMS.txt`：两个 ZIP 的 SHA-256 校验值。
-
-本地包均含一个 `vmnet8-sync-0.1.0` 顶层目录。不要上传自己系统中的 `installation.json`、`last-result.json`、网卡配置、检材、安装日志或个人截图。
-
-## 自动发布
-
-工作流在推送和 PR 时运行只读/模拟测试、生成 ZIP 并上传为工作流 artifact。它不在 CI 安装 VMware，也不执行真实网络修复。
-
-本地或 CI 都可以用 Windows PowerShell 5.1 执行：
+在 Windows PowerShell 5.1 运行：
 
 ```powershell
 .\Test-Worker.ps1
@@ -44,25 +13,32 @@ git push -u origin main
 .\Test-Package.ps1
 ```
 
-版本号来自 `VERSION`。更新版本号和 CHANGELOG 后推送同名版本标签：
+生成：
 
-```powershell
-git tag v0.1.0
-git push origin v0.1.0
-```
+- `vmnet8-sync-0.2.0-windows-x64.zip`：完整解压后双击 Install.cmd。
+- `vmnet8-sync-0.2.0-source.zip`：完整源码、文档、测试及隐藏的 GitHub 工作流。
+- `SHA256SUMS.txt`：两个包的 SHA-256 校验。
 
-标签需与 `VERSION` 一致。`release.yml` 会测试、打包并使用仓库自带 `GITHUB_TOKEN` 发布一个 **prerelease**；不需要添加个人访问令牌。仓库若禁用了 Actions 写权限，需要由仓库管理员允许工作流发布 Release。手动 `workflow_dispatch` 只生成 artifact，不自动发布标签。
+包内顶层目录为 vmnet8-sync-0.2.0。源码包为独立项目，用户包无需额外下载运行库。构建使用文件白名单；不包含本机配置、安装清单、基线、网络状态、凭据、检材或个人截图。
 
 ## 当前验证范围
 
-- 配置解析、网卡身份、路由、事件过滤及 Windows 对事件查询/任务 XML 的解析。
-- 模拟的成功修复、已一致退出、过期配置取消及超时退出。
-- 临时目录中的模拟安装、重复安装、升级回滚、卸载与重新安装。
-- 在 Windows 与 Workstation 17.6.3 上验证过早期版本的管理员安装、SACL 和任务注册；确认安装不启动工作程序。
-- 双击入口使用系统 PowerShell，安装与状态查看会申请 UAC。系统修复操作在自动化测试中使用模拟。
+配置解析覆盖 VMnet1、VMnet8、自定义 NAT、非固定 IP/前缀、关闭 DHCP/宿主机连接、桥接/占位项、无效网络隔离和重叠子网。事件过滤通过 Windows Event Log 查询解析和 Task Scheduler 定义解析，未注册测试任务。
 
-仍需在测试机完成：真实 VMware Apply → Security 事件 → SYSTEM 任务 → 跨子网续租 → 成功退出，以及不同 VMware/Windows 版本的兼容性。安装注册成功不等于这些端到端场景全部通过，因此首版以预览版发布。
+工作流程使用模拟的 Windows 网络、服务及数据保存操作，覆盖独立变更、多网络变更、队列重复、运行中变更、共享 DHCP 重试、失败后不意外重试和有界退出。安装测试只操作临时目录并模拟系统 API，覆盖从 0.1 升级、回滚、清单校验、基线恢复与卸载。
 
-## 发布验收
+源码中的 Test-Integration.ps1 可在已安装 VMware、VMnet1/VMnet8 状态一致的本地管理员 PowerShell 中单独运行。它建立隔离配置和临时 SYSTEM 任务，临时开启审计后恢复，不修改实际网卡或重启服务；默认报告写入系统临时目录。CI 不运行这个需要 VMware 和管理员权限的集成测试。
 
-在测试机解压用户包，安装后确认没有工作进程；修改网络并应用后确认自动执行和退出；再次安装、卸载、重新安装；确保未修改配置的开机、登录和空闲过程不触发额外工作程序。检查共享 DHCP 服务第二次尝试的短暂影响，及物理网卡和默认路由未被更改。
+真实系统只读检查已识别本机 Workstation 17.6.3 的 VMnet1 和 VMnet8，并确认当前 IP/前缀/路由一致。另用隔离文件/注册表配置验证了真实 Security 4663/4657 → SYSTEM 事件任务 → VMnet1/VMnet8 单独检查 → 正常退出，以及只读查询不触发。临时任务、配置及审计策略已清理或恢复，没有修改实际网卡或重启服务。这不等同于 VMware 原界面跨子网应用和真实续租修复验收。
+
+## 公开发布前的测试机验收
+
+在测试机安装用户包，确认无额外工作进程。分别修改 VMnet1、VMnet8、自定义 NAT/仅主机网络；验证 Security 文件/注册表事件 → SYSTEM 任务 → 正确网卡续租 → 退出。验证只修改一张时不会操作另一张、关闭宿主机连接/DHCP 不被自动恢复、重新安装和卸载完整清理。检查共享 DHCP 重启影响及读取/空闲/开机/登录均不额外触发。
+
+注册表路径、键名大小写、保存进程和 VMware 版本差异仍需兼容性测试。全局审计可能受组策略影响。
+
+## 标签与预发布
+
+仓库根需包含全部源码及 .github。工作流推送/PR 时测试并打包，匹配 VERSION 的 v<VERSION> 标签会在验证后生成 prerelease。workflow_dispatch 只生成构建 artifact。
+
+源码上传不改变仓库可见性，也不自动创建版本标签或 Release。保留预览标记，完成真实验收后再更新验证范围；需要创建预发布时，推送与 VERSION 一致的标签即可触发 release.yml。不要将本机配置、验证日志或诊断数据加入仓库。
