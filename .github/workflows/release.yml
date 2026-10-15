@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag and test
+        shell: powershell
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne ('v' + (Get-Content .\VERSION -Raw).Trim())) {
+            throw 'Tag does not match VERSION'
+          }
+          & .\Test-Worker.ps1
+          & .\Test-Setup.ps1
+          & .\Build.ps1
+          & .\Test-Package.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vmnet8-sync-release
+          path: dist/*
+      - name: Publish tag release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = @(Get-ChildItem .\dist\*.zip | ForEach-Object { $_.FullName })
+          $assets += (Resolve-Path .\dist\SHA256SUMS.txt).Path
+          gh release create $env:GITHUB_REF_NAME --verify-tag --prerelease --title "VMnet8 Sync $env:GITHUB_REF_NAME" --notes-file .\CHANGELOG.md @assets

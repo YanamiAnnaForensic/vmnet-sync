@@ -1,0 +1,11 @@
+/dist/
+/build/
+*.log
+*.tmp
+installation.json
+last-result.json
+before-repair.json
+task.xml
+.DS_Store
+Thumbs.db
+desktop.ini

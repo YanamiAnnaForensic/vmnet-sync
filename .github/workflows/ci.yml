@@ -1,0 +1,29 @@
+name: Windows tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate configuration, worker lifecycle and setup rollback
+        shell: powershell
+        run: |
+          & .\Test-Worker.ps1
+          & .\Test-Setup.ps1
+      - name: Build packages
+        shell: powershell
+        run: |
+          & .\Build.ps1
+          & .\Test-Package.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vmnet8-sync-packages
+          path: dist/*
