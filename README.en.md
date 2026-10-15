@@ -1,10 +1,42 @@
 # VMnet Sync
 
-An event-triggered VMware Workstation helper for Windows. Version 0.3.0 discovers configured VMnets, checks the corresponding host adapters after an edit, renews stale DHCP leases, verifies the results and exits.
+**Fix stale Windows host adapter addresses after VMware subnet changes. Check on configuration writes, repair eligible DHCP adapters, and exit without a resident synchronization process.**
 
 [中文说明](README.md)
 
-**0.3.0 passed local real-network acceptance on Windows 11 build 26200 and Workstation 17.6.3.** Original-UI changes, real DHCP repair and worker exit were verified for VMnet1, VMnet8 and custom VMnet3. Other versions still need compatibility testing. See [validation](docs/validation.md).
+## What does this project do?
+
+VMnet Sync is a VMware Workstation network helper for Windows. It addresses a specific problem: you save a new subnet in VMware's Virtual Network Editor, but the corresponding Windows host adapter keeps its old DHCP address. The host adapter and the virtual network can then end up on different subnets.
+
+For example, you change VMnet8 from `192.168.56.0/24` to `192.168.36.0/24`, while its host adapter still has `192.168.56.1/24`. The tool reads VMware's saved configuration, identifies that adapter, requests a fresh DHCP address when automatic repair is supported, verifies its address, prefix and route, and exits. The actual address comes from VMware's configuration.
+
+It supports NAT, host-only and custom VMnet0–19 networks, beyond VMnet8. Keep using VMware's original interface. Editing only VMnet1 does not cause an unchanged VMnet8 to be repaired.
+
+## Why install it? Do I need it?
+
+It is useful if you frequently change VMware subnets for labs, network teaching, development, testing or forensic simulations and have encountered host adapters that fail to follow those changes. Install it once to handle eligible stale DHCP addresses automatically, reducing repeated manual checks and renewals.
+
+If your VMware host adapters already stay synchronized, you do not need to install it. It does not change static IPs inside guests, configure SSH or fix every connectivity problem. Automatic repair requires a connected host virtual adapter and VMware DHCP enabled in VMware. Disabled options and static Windows addresses are respected.
+
+## Does it run or use memory while idle?
+
+**There is no resident synchronization process or background polling.** Built-in Windows auditing and Task Scheduler receive configuration-write events and launch a worker only when one occurs.
+
+| Action or state | Automatic synchronization |
+|---|---|
+| Normal computer use or running VMs without writing VMware network configuration | Does not start |
+| Opening the editor or reading configuration | Does not proactively start |
+| Saving configuration writes a monitored file or registry value | Starts a check; repairs eligible adapters if needed |
+| Configuration matches or repair succeeds | Exits |
+| Repair fails or times out | Records the result and exits within its time limit; no ongoing background retry |
+| Boot, logon or installation completion | Does not independently trigger synchronization |
+| VMware upgrades or Restore Defaults write monitored configuration | May also trigger a check |
+
+The trigger is a **configuration write**, so it is not restricted to a person clicking Apply. Multiple events from one save may queue checks; checks with no configuration changes exit quickly. Manually opening setup or the status tool also briefly runs the corresponding program.
+
+PowerShell and network modules use memory while the worker runs. Windows auditing and scheduling have some additional overhead. The measured idle state was `Ready`, with `0` running worker instances; this does not imply zero total system overhead. Normal synchronization has a roughly 90-second limit, with a separate two-minute task limit.
+
+The helper uses built-in Windows components, requires one administrator installation and has no additional runtime download. **0.3.0 passed local real-network acceptance on Windows 11 build 26200 and Workstation 17.6.3.** Other versions still need compatibility testing. See [validation](docs/validation.md).
 
 ## Use
 
