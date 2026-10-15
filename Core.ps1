@@ -106,7 +106,9 @@ function Read-DesiredNetwork([string]$NatText, [string]$DhcpText, [string]$Id = 
         Id = $Id; Kind = $(if ($IsNat) { 'NAT' } else { 'HostOnly' }); Disposition = 'Ready'; Reason = ''
         HostIP = $hostIp; PrefixLength = $prefix; Gateway = $gateway; HostMac = $mac
         Network = "$(ConvertFrom-IPv4Number $networkNumber)/$prefix"
-        Fingerprint = Get-TextHash ($hosts[0].Body + $subnet.Header.Value + $subnet.Body + $(if ($IsNat) { $section } else { '' }))
+        # VMware rewrites CRLF/LF and indentation for untouched networks on Apply.
+        # Formatting changes must not select an unrelated host adapter.
+        Fingerprint = Get-TextHash (([regex]::Replace(($hosts[0].Body + $subnet.Header.Value + $subnet.Body + $(if ($IsNat) { $section } else { '' })), '\s+', ' ')).Trim())
     }
 }
 
@@ -157,7 +159,8 @@ function Read-VMnetInventory {
                     Id = 'VMnet' + [int]$name.Substring(5)
                     Configured = ($null -ne $flags.Adapter -or $null -ne $flags.DHCP -or $null -ne $flags.NAT)
                     AdapterEnabled = ($flags.Adapter -eq 1); DhcpEnabled = ($flags.DHCP -eq 1); NatEnabled = ($flags.NAT -eq 1)
-                    Subnet = ([string]$key.GetValue('IPSubnetAddress', '')).Trim([char]0).Trim(); Gateway = $gateway
+                    Subnet = ([string]$key.GetValue('IPSubnetAddress', '')).Trim([char]0).Trim()
+                    SubnetMask = ([string]$key.GetValue('IPSubnetMask', '')).Trim([char]0).Trim(); Gateway = $gateway
                 }
             } finally { $key.Dispose() }
         }
@@ -183,6 +186,9 @@ function Read-NetworkFiles([string]$Directory) {
                 $state = Read-DesiredNetwork $nat $dhcp $entry.Id $entry.NatEnabled
                 $state.Fingerprint = Get-TextHash ($metadata + $state.Fingerprint)
                 if ($entry.Subnet -ne '' -and $state.Network.Split('/')[0] -ne $entry.Subnet) { throw 'Registry and DHCP subnet disagree; configuration may still be changing.' }
+                # Some VMware versions omit this value for the default /24.
+                # When present it must agree with DHCP before touching an adapter.
+                if ($entry.SubnetMask -ne '' -and (ConvertFrom-IPv4Mask $entry.SubnetMask) -ne $state.PrefixLength) { throw 'Registry and DHCP subnet masks disagree; configuration may still be changing.' }
                 if ($entry.NatEnabled -and $entry.Gateway -ne '' -and $entry.Gateway -ne $state.Gateway) { throw 'Registry and NAT gateway disagree.' }
             } catch {
                 $problem = $_.Exception.Message
@@ -214,7 +220,7 @@ function Read-NetworkFiles([string]$Directory) {
 }
 
 function New-ConfigBaseline($Snapshot) {
-    return [pscustomobject]@{ Version=2; Networks=@($Snapshot.Networks | Select-Object Id,Fingerprint) }
+    return [pscustomobject]@{ Version=2; FingerprintVersion=3; Networks=@($Snapshot.Networks | Select-Object Id,Fingerprint) }
 }
 
 function Get-ChangedNetworks($Snapshot, $Baseline) {
@@ -239,6 +245,7 @@ function Write-JsonAtomic([string]$Path, $Value) {
 function Read-ValidBaseline([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { throw 'Configuration baseline is missing. Reinstall to initialize it without repairing adapters.' }
     $baseline = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
+    if (-not $baseline.PSObject.Properties['FingerprintVersion'] -or $baseline.FingerprintVersion -ne 3) { throw 'Configuration fingerprint format changed. Reinstall to snapshot it without repairing adapters.' }
     if ($baseline.Version -ne 2 -or -not $baseline.PSObject.Properties['Networks'] -or @($baseline.Networks).Count -gt 20) { throw 'Invalid configuration baseline. Reinstall to recover.' }
     $seen = @{}
     foreach ($entry in $baseline.Networks) {

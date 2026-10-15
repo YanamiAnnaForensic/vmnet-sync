@@ -1,17 +1,17 @@
-# VMnet8 Sync
+# VMnet Sync
 
 **修改 VMware 虚拟网络后，按网络分别同步 Windows 宿主机虚拟网卡。修改时触发，检查完成后退出。**
 
 [English](README.en.md) · [工作原理](docs/architecture.md) · [故障排查](docs/troubleshooting.md) · [发布指南](docs/publishing.md)
 
-VMware 虚拟网络编辑器有时已切换到新子网，Windows 对应的虚拟网卡却仍保留旧 DHCP 地址。0.2.0 将检查范围从 VMnet8 扩展到仅主机网络和自定义 VMnet，按实际配置定位对应网卡并定向续租。
+VMware 虚拟网络编辑器有时已切换到新子网，Windows 对应的虚拟网卡却仍保留旧 DHCP 地址。0.3.0 将检查范围从 VMnet8 扩展到仅主机网络和自定义 VMnet，按实际配置定位对应网卡并定向续租。
 
-这是 VMware Workstation 的独立辅助工具，使用 Windows 自带组件，需要一次管理员安装，无额外运行库下载。**当前 0.2.0 为预览版：已通过自动测试和隔离配置下的真实事件触发验证，真实跨子网续租仍待验收。**
+这是 VMware Workstation 的独立辅助工具，使用 Windows 自带组件，需要一次管理员安装，无额外运行库下载。**0.3.0 已完成本机实网验收：VMnet1、VMnet8 和新建 VMnet3 的配置写入、SYSTEM 任务、真实 DHCP 修复与退出均已验证。跨版本兼容性仍按预览版提供。** 详见[验证记录](docs/validation.md)。
 
 ## 快速开始
 
-1. 从 GitHub Actions 成功运行页下载打包 artifact，解压其中的 `vmnet8-sync-0.2.0-windows-x64.zip`。
-2. 双击 **Install.cmd** 并接受 UAC。已有 0.1.0 时，同一入口会升级并迁移配置。
+1. 从 [GitHub Releases](https://github.com/YanamiAnnaForensic/vmnet-sync/releases) 下载并解压 `vmnet-sync-0.3.0-windows-x64.zip`。
+2. 双击 **Install.cmd** 并接受 UAC。已有 0.1/0.2 时，同一入口会升级，并迁移旧任务、程序目录及诊断数据。
 3. 照常进入 VMware 的“编辑 → 虚拟网络编辑器”，修改目标网络并点击“应用”。
 
 | 入口 | 功能 |
@@ -20,7 +20,7 @@ VMware 虚拟网络编辑器有时已切换到新子网，Windows 对应的虚�
 | `Status.cmd` | 查看版本、任务、运行实例数和最近同步结果 |
 | `Uninstall.cmd` | 删除自动任务、程序及新增审计规则，保留诊断数据 |
 
-安装后无需保留解压目录。为兼容旧版，产品名、`%ProgramFiles%\Vmnet8Sync`、`%ProgramData%\Vmnet8Sync` 和任务名 `Vmnet8Sync-AfterConfigWrite` 暂时保留。
+安装后无需保留解压目录。程序位于 `%ProgramFiles%\VmnetSync`，数据位于 `%ProgramData%\VmnetSync`，任务名为 `VmnetSync-AfterConfigWrite`。旧 `Vmnet8Sync` 安装在成功升级后移除；迁移失败会回滚。
 
 ## 支持范围
 
@@ -35,7 +35,7 @@ VMware 虚拟网络编辑器有时已切换到新子网，Windows 对应的虚�
 | Windows 网卡静态配置 | 可检查已有配置；不覆盖不一致的静态地址 |
 | 网卡禁用、缺失、MAC 不符或有默认路由 | 报告需要处理，不强制修复 |
 
-支持 Windows 10/11 x64、Windows PowerShell 5.1。已在本机 Workstation 17.6.3 上只读检查 VMnet1 和 VMnet8；其他版本及完整事件链路仍需验证。支持重命名后的 Windows 网卡、非 /24 子网，以及非固定 .1/.2 的宿主机和网关地址。不修改客体系统 IP、物理网卡、IPv6 或 VMware 配置文件。
+支持 Windows 10/11 x64、Windows PowerShell 5.1。已在 Windows 11 build 26200、Workstation 17.6.3 上验证 VMnet1/8 和自定义 VMnet3；其他 Windows/VMware 版本仍需兼容性验证。支持重命名后的 Windows 网卡、非 /24 子网，以及非固定 .1/.2 的宿主机和网关地址。不修改客体系统 IP、物理网卡、IPv6 或 VMware 配置文件。
 
 ## 何时运行
 
@@ -49,7 +49,7 @@ VMware 虚拟网络编辑器有时已切换到新子网，Windows 对应的虚�
 
 ## 修复和结果
 
-先对目标网卡执行 `ipconfig /renew "实际网卡名称"`。仍不同步时，每轮最多重启一次共享的 **VMnetDHCP** 服务，再定向续租。共享服务重启会短暂影响其他 VMware 网络的 DHCP 请求。不会重启 NAT 服务。
+先对目标网卡执行 `ipconfig /renew "实际网卡名称"`。仍不同步时，每轮最多重启一次共享的 **VMnetDHCP** 服务，然后仅对目标网卡释放旧 DHCP 租约并重新申请。共享服务重启会短暂影响其他 VMware 网络的 DHCP 请求。不会重启 NAT 服务。
 
 每个网络需要连续三次验证地址、掩码、地址状态、直连路由及所需服务都正确，才报告 `Synced`。这不证明客体 SSH、DNS 或所有 NAT 转发规则可用。单个网络配置错误不会阻止其他已变更且有效的网络处理。
 
@@ -61,7 +61,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Sync.ps1 -Mode Check
 
 `Check` 不续租、不写基线或结果文件。退出码：`0` 为一致/跳过，`2` 为需要处理，`1` 为检查错误。管理员可明确运行 `-Mode Repair` 来检查并修复所有符合条件的网络；自动任务额外使用 `-EventMode`，仅处理配置发生变化的网络。
 
-`%ProgramData%\Vmnet8Sync` 保存 `baseline.json`、`last-result.json` 和 `before-repair.json`，仅保留最近数据。安装后没有结果文件属正常情况。
+`%ProgramData%\VmnetSync` 保存 `baseline.json`、`last-result.json` 和 `before-repair.json`，仅保留最近数据。安装后没有结果文件属正常情况。
 
 ## 安装和卸载
 
@@ -76,10 +76,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Sync.ps1 -Mode Check
 ```powershell
 .\Test-Worker.ps1
 .\Test-Setup.ps1
+.\Test-Migration.ps1
+.\Test-Renewal.ps1
 .\Build.ps1
 .\Test-Package.ps1
 ```
 
-测试使用模拟系统操作及临时目录。另在本机隔离配置中实测了文件写入 4663、注册表修改 4657 → SYSTEM 工作程序 → VMnet1/VMnet8 独立检查 → 退出，以及只读查询不触发；临时任务、配置与审计策略已清理或恢复。该验证没有改变实际网卡。**VMware 原界面应用跨子网修改并完成真实续租，仍待测试机端到端验收。**
+自动测试覆盖 63 项解析/工作流程、11 项安装、4 项旧名迁移和 3 项续租命令行为。另完成真实 VMware 原界面跨子网应用、旧租约复现与实际修复、自定义网络创建/修改/退出、宿主机连接与 DHCP 开关、安装升级回滚和卸载重装验收；隔离配置的 4663/4657 事件链验证也已通过。实际测试后的原网络已恢复，临时网卡已移除。详见[验证记录与复现方法](docs/validation.md)。
 
 MIT 许可。VMware 商标属于权利人，本工具与 VMware 官方无隶属关系，不附带 VMware 文件。

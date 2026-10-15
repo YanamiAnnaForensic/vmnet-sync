@@ -9,7 +9,7 @@ assignees: ''
 **Environment / 环境**
 - Windows version:
 - VMware Workstation version:
-- VMnet8 Sync version:
+- VMnet Sync version:
 - Affected VMnet ID and mode (NAT / host-only):
 - Connect host virtual adapter enabled:
 - VMware DHCP enabled; Windows adapter uses DHCP or static IP:

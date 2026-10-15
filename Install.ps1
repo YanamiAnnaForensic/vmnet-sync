@@ -15,9 +15,9 @@ if (-not [Environment]::Is64BitProcess) { throw 'Use 64-bit Windows PowerShell (
 . "$PSScriptRoot\Audit.ps1"
 . "$PSScriptRoot\Setup.Common.ps1"
 $config = Join-Path $env:ProgramData 'VMware'
-$destination = Join-Path $env:ProgramFiles 'Vmnet8Sync'
-$dataDirectory = Join-Path $env:ProgramData 'Vmnet8Sync'
-$taskName = 'Vmnet8Sync-AfterConfigWrite'
+$destination = Join-Path $env:ProgramFiles 'VmnetSync'
+$dataDirectory = Join-Path $env:ProgramData 'VmnetSync'
+$taskName = 'VmnetSync-AfterConfigWrite'
 $manifestPath = Join-Path $destination 'installation.json'
 $runtimeFiles = @('Core.ps1','Sync.ps1','Audit.ps1','Setup.Common.ps1','Uninstall.ps1','Status.ps1','VERSION')
 $savedFiles = @{}
@@ -34,11 +34,13 @@ $savedBaseline = $null
 $entries = @()
 $newRights = @()
 $filesChanged = $false
-$setupMutex = New-Object Threading.Mutex($false, 'Global\Vmnet8Sync.Setup')
+$setupMutex = New-Object Threading.Mutex($false, 'Global\VmnetSync.Setup')
 $ownsMutex = $false
+$legacyMigration = $null
 try {
     try { $ownsMutex = $setupMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
     if (-not $ownsMutex) { throw 'Another install or uninstall is running.' }
+    $legacyMigration = Move-LegacyInstallation $config $destination $dataDirectory
     $initialSnapshot = Read-NetworkFiles $config
     $editors = @(Get-NetworkEditors)
     foreach ($name in $runtimeFiles) {
@@ -57,8 +59,8 @@ try {
     $oldTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($oldTask -and $null -eq $previous) { throw "Task already exists without a matching manifest: $taskName" }
     Initialize-AuditNative
-    $oldFlags = [Vmnet8Sync.AuditNative]::GetFlags()
-    $oldRegistryFlags = [Vmnet8Sync.AuditNative]::GetRegistryFlags()
+    $oldFlags = [VmnetSync.AuditNative]::GetFlags()
+    $oldRegistryFlags = [VmnetSync.AuditNative]::GetRegistryFlags()
     foreach ($target in @(Get-ConfigAuditTargets $config)) {
         $rule = New-ConfigAuditRule $target
         $existingRights = 0
@@ -95,12 +97,12 @@ try {
     $originalRegistryFlags = if ($null -ne $previous -and $previous.PSObject.Properties['OriginalRegistryAuditFlags']) { $previous.OriginalRegistryAuditFlags } else { $oldRegistryFlags }
     $manifest = [ordered]@{ Version=2; ProductVersion=$version; Installed=(Get-Date -Format o); ConfigDirectory=$config; TaskName=$taskName; OriginalAuditFlags=$originalFlags; OriginalRegistryAuditFlags=$originalRegistryFlags; AuditEntries=$entries }
     [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5))
-    [Vmnet8Sync.AuditNative]::SetFlags(($oldFlags -band 3) -bor 1)
+    [VmnetSync.AuditNative]::SetFlags(($oldFlags -band 3) -bor 1)
     $policyChanged = $true
-    if (([Vmnet8Sync.AuditNative]::GetFlags() -band 1) -eq 0) { throw 'File System success auditing did not become active; check group policy.' }
-    [Vmnet8Sync.AuditNative]::SetRegistryFlags(($oldRegistryFlags -band 3) -bor 1)
+    if (([VmnetSync.AuditNative]::GetFlags() -band 1) -eq 0) { throw 'File System success auditing did not become active; check group policy.' }
+    [VmnetSync.AuditNative]::SetRegistryFlags(($oldRegistryFlags -band 3) -bor 1)
     $registryPolicyChanged = $true
-    if (([Vmnet8Sync.AuditNative]::GetRegistryFlags() -band 1) -eq 0) { throw 'Registry success auditing did not become active; check group policy.' }
+    if (([VmnetSync.AuditNative]::GetRegistryFlags() -band 1) -eq 0) { throw 'Registry success auditing did not become active; check group policy.' }
     $auditChanged = $true
     Restore-ConfigAudit $config
     $snapshot = Read-NetworkFiles $config
@@ -114,7 +116,8 @@ try {
     [IO.File]::WriteAllText((Join-Path $destination 'task.xml'), $xml, [Text.Encoding]::Unicode)
     [void](Register-ScheduledTask -TaskName $taskName -Xml $xml -Force)
     $newTaskRegistered = $true
-    Write-Output "VMnet8 Sync $version installed. Waiting for a VMware configuration-write event."
+    Complete-LegacyMigration $legacyMigration
+    Write-Output "VMnet Sync $version installed. Waiting for a VMware configuration-write event."
     Write-Output 'No worker was started by installation. Use Status.cmd to inspect the task.'
 } catch {
     $failure = $_
@@ -124,8 +127,8 @@ try {
             try { Remove-AddedConfigAudit $entry $config } catch { Write-Warning "Audit rollback: $($_.Exception.Message)" }
         }
     }
-    if ($policyChanged) { [Vmnet8Sync.AuditNative]::SetFlags($oldFlags) }
-    if ($registryPolicyChanged) { [Vmnet8Sync.AuditNative]::SetRegistryFlags($oldRegistryFlags) }
+    if ($policyChanged) { [VmnetSync.AuditNative]::SetFlags($oldFlags) }
+    if ($registryPolicyChanged) { [VmnetSync.AuditNative]::SetRegistryFlags($oldRegistryFlags) }
     if ($filesChanged) {
         if ($null -ne $savedBaseline) { [IO.File]::WriteAllBytes($baselinePath, $savedBaseline) }
         elseif (Test-Path -LiteralPath $baselinePath) { Remove-Item -LiteralPath $baselinePath }
@@ -139,6 +142,7 @@ try {
         if ($null -ne $oldTaskXml -and $newTaskRegistered) { [void](Register-ScheduledTask -TaskName $taskName -Xml $oldTaskXml -Force) }
         if ($oldTaskEnabled) { Enable-ScheduledTask -TaskName $taskName -ErrorAction Continue | Out-Null }
     }
+    Undo-LegacyMigration $legacyMigration
     throw $failure
 } finally {
     if ($ownsMutex) { $setupMutex.ReleaseMutex() }

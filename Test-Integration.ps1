@@ -2,13 +2,13 @@
 #Requires -RunAsAdministrator
 param(
     [string]$SourceDirectory=$PSScriptRoot,
-    [string]$ResultPath=(Join-Path ([IO.Path]::GetTempPath()) 'vmnet8-sync-integration-result.json')
+    [string]$ResultPath=(Join-Path ([IO.Path]::GetTempPath()) 'vmnet-sync-integration-result.json')
 )
 $ErrorActionPreference='Stop'
 $integrationId=[guid]::NewGuid().ToString('N')
-$integrationRoot=Join-Path $env:ProgramData ('Vmnet8Sync-Integration-'+$integrationId)
-$integrationRegistry='HKLM:\SOFTWARE\Vmnet8Sync-Integration-'+$integrationId
-$integrationTask='Vmnet8Sync-Integration-'+$integrationId
+$integrationRoot=Join-Path $env:ProgramData ('VmnetSync-Integration-'+$integrationId)
+$integrationRegistry='HKLM:\SOFTWARE\VmnetSync-Integration-'+$integrationId
+$integrationTask='VmnetSync-Integration-'+$integrationId
 $integrationReport=[ordered]@{Time=(Get-Date -Format o);Status='Starting';Tests=@();ActualNetworkChanges=$false;Cleanup='Pending'}
 $integrationOldFileFlags=$null; $integrationOldRegistryFlags=$null
 $integrationTaskCreated=$false; $integrationExit=1
@@ -27,21 +27,22 @@ try {
     New-ManagedDirectory $integrationRoot
     $integrationConfig=Join-Path $integrationRoot 'config'
     New-ManagedDirectory $integrationConfig
-    New-ManagedDirectory (Join-Path $integrationRoot 'Vmnet8Sync')
+    New-ManagedDirectory (Join-Path $integrationRoot 'VmnetSync')
     foreach ($integrationFile in @('Sync.ps1','Core.ps1','Audit.ps1')) { Copy-Item -LiteralPath (Join-Path $SourceDirectory $integrationFile) -Destination $integrationRoot }
     # Keep the fixture's worker mutex separate from installed workers/tests.
     $integrationSyncPath=Join-Path $integrationRoot 'Sync.ps1'
-    $integrationSyncSource=[IO.File]::ReadAllText($integrationSyncPath).Replace('Global\Vmnet8Sync.Worker',('Global\Vmnet8Sync.Integration.'+$integrationId))
+    $integrationSyncSource=[IO.File]::ReadAllText($integrationSyncPath).Replace('Global\VmnetSync.Worker',('Global\VmnetSync.Integration.'+$integrationId))
     [IO.File]::WriteAllText($integrationSyncPath,$integrationSyncSource,[Text.Encoding]::UTF8)
     foreach ($integrationFile in @('vmnetnat.conf','vmnetdhcp.conf')) { Copy-Item -LiteralPath (Join-Path $integrationRealConfig $integrationFile) -Destination $integrationConfig }
     $integrationReport.IsAdministrator=Test-Administrator
     # Open an explicitly writable handle; do not reuse a provider read handle.
-    $integrationNativeKey=[Microsoft.Win32.Registry]::LocalMachine.CreateSubKey(('SOFTWARE\Vmnet8Sync-Integration-'+$integrationId))
+    $integrationNativeKey=[Microsoft.Win32.Registry]::LocalMachine.CreateSubKey(('SOFTWARE\VmnetSync-Integration-'+$integrationId))
     $integrationNativeKey.Dispose()
     foreach ($integrationEntry in $integrationInventory) {
         $integrationKey=Join-Path $integrationRegistry $integrationEntry.Id.ToLowerInvariant()
         [void](New-Item -Path $integrationKey)
         New-ItemProperty -LiteralPath $integrationKey -Name IPSubnetAddress -Value $integrationEntry.Subnet -PropertyType String | Out-Null
+        if ($integrationEntry.SubnetMask -ne '') { New-ItemProperty -LiteralPath $integrationKey -Name IPSubnetMask -Value $integrationEntry.SubnetMask -PropertyType String | Out-Null }
         foreach ($integrationPart in @('Adapter','DHCP','NAT')) {
             $integrationPartKey=Join-Path $integrationKey $integrationPart
             [void](New-Item -Path $integrationPartKey)
@@ -53,7 +54,7 @@ try {
     $script:integrationFixtureRegistry=$integrationRegistry
     function Get-VMnetRegistryRoot { return $script:integrationFixtureRegistry }
     $integrationSnapshot=Read-NetworkFiles $integrationConfig
-    Write-JsonAtomic (Join-Path $integrationRoot 'Vmnet8Sync\baseline.json') (New-ConfigBaseline $integrationSnapshot)
+    Write-JsonAtomic (Join-Path $integrationRoot 'VmnetSync\baseline.json') (New-ConfigBaseline $integrationSnapshot)
     $integrationWrapper=@'
 $ErrorActionPreference='Stop'
 . "$PSScriptRoot\Sync.ps1" -Mode Repair -ConfigDirectory "$PSScriptRoot\config" -TimeoutSeconds 45 -EventMode
@@ -76,10 +77,10 @@ try {
     $integrationWorker=Join-Path $integrationRoot 'IntegrationWorker.ps1'
     [IO.File]::WriteAllText($integrationWorker,$integrationWrapper,[Text.Encoding]::UTF8)
     Initialize-AuditNative
-    $integrationOldFileFlags=[Vmnet8Sync.AuditNative]::GetFlags()
-    $integrationOldRegistryFlags=[Vmnet8Sync.AuditNative]::GetRegistryFlags()
-    [Vmnet8Sync.AuditNative]::SetFlags(($integrationOldFileFlags -band 3) -bor 1)
-    [Vmnet8Sync.AuditNative]::SetRegistryFlags(($integrationOldRegistryFlags -band 3) -bor 1)
+    $integrationOldFileFlags=[VmnetSync.AuditNative]::GetFlags()
+    $integrationOldRegistryFlags=[VmnetSync.AuditNative]::GetRegistryFlags()
+    [VmnetSync.AuditNative]::SetFlags(($integrationOldFileFlags -band 3) -bor 1)
+    [VmnetSync.AuditNative]::SetRegistryFlags(($integrationOldRegistryFlags -band 3) -bor 1)
     Restore-ConfigAudit $integrationConfig
     $integrationPowerShell="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
     $integrationXml=New-SyncTaskXml $integrationConfig $integrationWorker @($integrationPowerShell)
@@ -93,7 +94,7 @@ try {
 
     function Wait-IntegrationResult([string]$ExpectedId,[string]$ExpectedStatus,[DateTime]$Since) {
         $integrationWait=[Diagnostics.Stopwatch]::StartNew()
-        $integrationResultFile=Join-Path $integrationRoot 'Vmnet8Sync\last-result.json'
+        $integrationResultFile=Join-Path $integrationRoot 'VmnetSync\last-result.json'
         while ($integrationWait.Elapsed.TotalSeconds -lt 65) {
             if (Test-Path -LiteralPath (Join-Path $integrationRoot 'error.txt')) { throw ([IO.File]::ReadAllText((Join-Path $integrationRoot 'error.txt'))) }
             if (Test-Path -LiteralPath $integrationResultFile) {
@@ -139,7 +140,7 @@ try {
     $integrationAfter=$integrationScheduler.GetFolder('\').GetTask($integrationTask)
     if ($integrationBefore -ne $integrationAfter.LastRunTime -or $integrationAfter.GetInstances(0).Count -ne 0) { throw 'Read-only inspection triggered a worker.' }
     $integrationReport.Tests+=@{Name='Configuration reads do not start worker and no worker remains resident';Status='Passed'}
-    $integrationEvents=@(Get-WinEvent -FilterHashtable @{LogName='Security';Id=4663,4657;StartTime=(Get-Date).AddMinutes(-5)} -ErrorAction SilentlyContinue | Where-Object {$_.ToXml().Contains('Vmnet8Sync-Integration-'+$integrationId)})
+    $integrationEvents=@(Get-WinEvent -FilterHashtable @{LogName='Security';Id=4663,4657;StartTime=(Get-Date).AddMinutes(-5)} -ErrorAction SilentlyContinue | Where-Object {$_.ToXml().Contains('VmnetSync-Integration-'+$integrationId)})
     $integrationReport.EventIds=@($integrationEvents.Id | Sort-Object -Unique)
     if (4663 -notin $integrationReport.EventIds -or 4657 -notin $integrationReport.EventIds) { throw 'Missing expected Security audit event IDs.' }
     $integrationRegistryTarget=[pscustomobject]@{Path=$integrationRegistry;AddedRights=2}
@@ -175,20 +176,20 @@ try {
             Wait-WorkerExit $integrationTask
             Unregister-ScheduledTask -TaskName $integrationTask -Confirm:$false
         }
-        if ($integrationRegistry -notmatch '^HKLM:\\SOFTWARE\\Vmnet8Sync-Integration-[0-9a-f]{32}$') { throw 'Unexpected registry cleanup path.' }
-        [Microsoft.Win32.Registry]::LocalMachine.DeleteSubKeyTree(('SOFTWARE\Vmnet8Sync-Integration-'+$integrationId),$false)
+        if ($integrationRegistry -notmatch '^HKLM:\\SOFTWARE\\VmnetSync-Integration-[0-9a-f]{32}$') { throw 'Unexpected registry cleanup path.' }
+        [Microsoft.Win32.Registry]::LocalMachine.DeleteSubKeyTree(('SOFTWARE\VmnetSync-Integration-'+$integrationId),$false)
         if (Test-Path -LiteralPath $integrationRoot) {
             $integrationResolved=[IO.Path]::GetFullPath($integrationRoot)
             $integrationExpectedParent=[IO.Path]::GetFullPath($env:ProgramData).TrimEnd('\')+'\'
-            if (-not $integrationResolved.StartsWith($integrationExpectedParent,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($integrationResolved) -notmatch '^Vmnet8Sync-Integration-[0-9a-f]{32}$') { throw 'Unexpected filesystem cleanup path.' }
+            if (-not $integrationResolved.StartsWith($integrationExpectedParent,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($integrationResolved) -notmatch '^VmnetSync-Integration-[0-9a-f]{32}$') { throw 'Unexpected filesystem cleanup path.' }
             Remove-Item -LiteralPath $integrationResolved -Recurse -Force
         }
         $integrationReport.Cleanup='Passed'
     } catch { $integrationReport.Cleanup='Failed';$integrationReport.CleanupError=$_.Exception.Message;$integrationExit=1 }
-    if ($null -ne $integrationOldFileFlags) { [Vmnet8Sync.AuditNative]::SetFlags($integrationOldFileFlags) }
-    if ($null -ne $integrationOldRegistryFlags) { [Vmnet8Sync.AuditNative]::SetRegistryFlags($integrationOldRegistryFlags) }
+    if ($null -ne $integrationOldFileFlags) { [VmnetSync.AuditNative]::SetFlags($integrationOldFileFlags) }
+    if ($null -ne $integrationOldRegistryFlags) { [VmnetSync.AuditNative]::SetRegistryFlags($integrationOldRegistryFlags) }
     if ($null -ne $integrationOldFileFlags -and $null -ne $integrationOldRegistryFlags) {
-        $integrationReport.AuditPolicyRestored=(([Vmnet8Sync.AuditNative]::GetFlags() -band 3) -eq ($integrationOldFileFlags -band 3) -and ([Vmnet8Sync.AuditNative]::GetRegistryFlags() -band 3) -eq ($integrationOldRegistryFlags -band 3))
+        $integrationReport.AuditPolicyRestored=(([VmnetSync.AuditNative]::GetFlags() -band 3) -eq ($integrationOldFileFlags -band 3) -and ([VmnetSync.AuditNative]::GetRegistryFlags() -band 3) -eq ($integrationOldRegistryFlags -band 3))
         if (-not $integrationReport.AuditPolicyRestored) { $integrationReport.Cleanup='Failed';$integrationExit=1 }
     }
     [IO.File]::WriteAllText($ResultPath,($integrationReport | ConvertTo-Json -Depth 8),[Text.Encoding]::UTF8)

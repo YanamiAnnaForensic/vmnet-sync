@@ -35,11 +35,23 @@ function Get-ActualNetwork($Desired) {
     return [pscustomobject]$result
 }
 
-function Invoke-AdapterRenew([string]$Alias, [int]$LimitMilliseconds) {
+function Invoke-AdapterRenew([string]$Alias, [int]$LimitMilliseconds, [switch]$Rebind) {
+    if (-not $Rebind) { return Invoke-TargetIpConfig $Alias 'renew' $LimitMilliseconds }
+    # A renewal can ACK the old address even after VMware changes subnet.
+    # Drop only this DHCP lease before requesting a fresh reservation.
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    try { $release=Invoke-TargetIpConfig $Alias 'release' ([math]::Min(5000,$LimitMilliseconds)) }
+    catch { $release=[pscustomobject]@{Output='';Error=$_.Exception.Message} }
+    $remaining=[math]::Max(1000,($LimitMilliseconds-[int]$watch.Elapsed.TotalMilliseconds))
+    $renew=Invoke-TargetIpConfig $Alias 'renew' $remaining
+    return [pscustomobject]@{ExitCode=$renew.ExitCode;Output=($release.Output+$renew.Output);Error=($release.Error+$renew.Error)}
+}
+
+function Invoke-TargetIpConfig([string]$Alias, [ValidateSet('renew','release')][string]$Operation, [int]$LimitMilliseconds) {
     if ($Alias -match '["*?]') { throw 'Unsupported quote or wildcard in adapter name.' }
     $info = New-Object Diagnostics.ProcessStartInfo
     $info.FileName = "$env:SystemRoot\System32\ipconfig.exe"
-    $info.Arguments = '/renew "' + $Alias + '"'
+    $info.Arguments = '/' + $Operation + ' "' + $Alias + '"'
     $info.UseShellExecute = $false; $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
     $process = [Diagnostics.Process]::Start($info)
@@ -66,11 +78,11 @@ function Restart-SharedDhcp {
 }
 
 function Read-ConfigBaseline {
-    return Read-ValidBaseline (Join-Path $env:ProgramData 'Vmnet8Sync\baseline.json')
+    return Read-ValidBaseline (Join-Path $env:ProgramData 'VmnetSync\baseline.json')
 }
 
 function Save-ConfigBaseline($Snapshot) {
-    Write-JsonAtomic (Join-Path $env:ProgramData 'Vmnet8Sync\baseline.json') (New-ConfigBaseline $Snapshot)
+    Write-JsonAtomic (Join-Path $env:ProgramData 'VmnetSync\baseline.json') (New-ConfigBaseline $Snapshot)
 }
 
 function Update-EventAudit {
@@ -85,12 +97,12 @@ function Test-ConfigCurrent([string]$Fingerprint) {
 function Write-RunResult($Result) {
     $Result | ConvertTo-Json -Depth 12 | Write-Output
     # A queued duplicate must not erase the useful result of the actual edit.
-    if ($Mode -eq 'Repair' -and $Result.Status -ne 'NoChanges') { Write-JsonAtomic (Join-Path $env:ProgramData 'Vmnet8Sync\last-result.json') $Result }
+    if ($Mode -eq 'Repair' -and $Result.Status -ne 'NoChanges') { Write-JsonAtomic (Join-Path $env:ProgramData 'VmnetSync\last-result.json') $Result }
 }
 
 function Save-RepairSnapshot($Actual) {
     $script:beforeSnapshots[$Actual.Id] = $Actual
-    Write-JsonAtomic (Join-Path $env:ProgramData 'Vmnet8Sync\before-repair.json') @($script:beforeSnapshots.Values)
+    Write-JsonAtomic (Join-Path $env:ProgramData 'VmnetSync\before-repair.json') @($script:beforeSnapshots.Values)
 }
 
 function Get-NetworkObservation($Desired) {
@@ -118,7 +130,7 @@ function Invoke-Synchronization {
         if ($bad) { return 2 }; return 0
     }
     if (-not (Test-Administrator)) { throw 'Repair requires an elevated administrator terminal.' }
-    $mutex = New-Object Threading.Mutex($false, 'Global\Vmnet8Sync.Worker')
+    $mutex = New-Object Threading.Mutex($false, 'Global\VmnetSync.Worker')
     $ownsMutex = $false
     try {
         try { $ownsMutex=$mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex=$true }
@@ -184,8 +196,9 @@ function Invoke-Synchronization {
                     if ((Get-SyncDecision $desired $fresh) -ne 'Repair' -or -not $fresh.ServicesRunning) { continue }
                     $remaining=[math]::Min(15000,[int](($TimeoutSeconds-$timer.Elapsed.TotalSeconds)*1000))
                     if ($remaining -lt 1000) { continue }
-                    $renewal=Invoke-AdapterRenew $fresh.Name $remaining
-                    $changes.Add("$($desired.Id): renewed DHCP on $($fresh.Name); exit code $($renewal.ExitCode)")
+                    $renewal=Invoke-AdapterRenew $fresh.Name $remaining -Rebind:($state.Attempt -eq 2)
+                    $detail=if ($state.Attempt -eq 2) { ' (released stale lease first)' } else { '' }
+                    $changes.Add("$($desired.Id): renewed DHCP on $($fresh.Name)$detail; exit code $($renewal.ExitCode)")
                 } catch { $state.Result.Reason=$_.Exception.Message; $lastProblem=$_.Exception.Message }
             }
             if ($refresh) { continue }

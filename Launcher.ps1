@@ -30,10 +30,10 @@ try {
             $message = "Installation complete. Only VMware network-configuration writes trigger the worker.`nNo boot, logon, timer or resident worker."
         }
         'Uninstall' {
-            $installed = Join-Path $env:ProgramFiles 'Vmnet8Sync\Uninstall.ps1'
+            $installed = Join-Path $env:ProgramFiles 'VmnetSync\Uninstall.ps1'
             if (Test-Path -LiteralPath $installed) { & $installed }
-            elseif (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'Vmnet8Sync\installation.json')) { throw 'Installation is incomplete. Run Install.cmd to recover before uninstalling.' }
-            else { Write-Output 'VMnet8 Sync is not installed.' }
+            elseif (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'VmnetSync\installation.json')) { throw 'Installation is incomplete. Run Install.cmd to recover before uninstalling.' }
+            else { Write-Output 'VMnet Sync is not installed.' }
             $message = 'Uninstall complete. The automatic task is removed. Network addresses were not changed.'
         }
         'Status' {
@@ -50,7 +50,7 @@ try {
     }
     if (-not $NoPause) {
         Add-Type -AssemblyName System.Windows.Forms
-        [void][Windows.Forms.MessageBox]::Show($message, 'VMnet8 Sync', 'OK', 'Information')
+        [void][Windows.Forms.MessageBox]::Show($message, 'VMnet Sync', 'OK', 'Information')
     }
 } catch {
     $exitCode = 1
@@ -58,7 +58,7 @@ try {
     Write-Host $message -ForegroundColor Red
     if (-not $NoPause) {
         Add-Type -AssemblyName System.Windows.Forms
-        [void][Windows.Forms.MessageBox]::Show($message, 'VMnet8 Sync - action failed', 'OK', 'Error')
+        [void][Windows.Forms.MessageBox]::Show($message, 'VMnet Sync - action failed', 'OK', 'Error')
     }
 }
 exit $exitCode

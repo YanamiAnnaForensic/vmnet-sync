@@ -1,12 +1,12 @@
 # Only installation and the elevated event worker load this file.
 function Initialize-AuditNative {
-    if ('Vmnet8Sync.AuditNative' -as [type]) { return }
+    if ('VmnetSync.AuditNative' -as [type]) { return }
     Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
-namespace Vmnet8Sync {
+namespace VmnetSync {
     public static class AuditNative {
         [StructLayout(LayoutKind.Sequential)] struct Luid { public uint Low; public int High; }
         [StructLayout(LayoutKind.Sequential)] struct Privileges { public uint Count; public Luid Luid; public uint Attributes; }
@@ -84,7 +84,7 @@ namespace Vmnet8Sync {
     }
 }
 '@
-    [Vmnet8Sync.AuditNative]::EnablePrivilege()
+    [VmnetSync.AuditNative]::EnablePrivilege()
 }
 
 function Get-ConfigAuditTargets([string]$Directory, [string]$RegistryRoot = (Get-VMnetRegistryRoot)) {
@@ -128,13 +128,13 @@ function Get-ConfigAuditAcl($Target) {
     # Windows PowerShell's registry provider does not reliably open a handle
     # with ACCESS_SYSTEM_SECURITY for Get-Acl -Audit. Open that right explicitly.
     $subkey=$Target.Path -replace '^HKLM:\\', ''
-    return [Vmnet8Sync.AuditNative]::ReadRegistryAudit($subkey)
+    return [VmnetSync.AuditNative]::ReadRegistryAudit($subkey)
 }
 
 function Set-ConfigAuditAcl($Target, $Acl) {
     if (-not $Target.PSObject.Properties['Kind'] -or $Target.Kind -ne 'Registry') { Set-Acl -LiteralPath $Target.Path -AclObject $Acl; return }
     $subkey=$Target.Path -replace '^HKLM:\\', ''
-    [Vmnet8Sync.AuditNative]::WriteRegistryAudit($subkey, $Acl)
+    [VmnetSync.AuditNative]::WriteRegistryAudit($subkey, $Acl)
 }
 
 function Restore-ConfigAudit([string]$Directory) {

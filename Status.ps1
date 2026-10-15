@@ -2,9 +2,9 @@
 [CmdletBinding()]
 param([switch]$Json)
 $ErrorActionPreference = 'Stop'
-$installation = Join-Path $env:ProgramFiles 'Vmnet8Sync\installation.json'
-$resultFile = Join-Path $env:ProgramData 'Vmnet8Sync\last-result.json'
-$baselineFile = Join-Path $env:ProgramData 'Vmnet8Sync\baseline.json'
+$installation = Join-Path $env:ProgramFiles 'VmnetSync\installation.json'
+$resultFile = Join-Path $env:ProgramData 'VmnetSync\last-result.json'
+$baselineFile = Join-Path $env:ProgramData 'VmnetSync\baseline.json'
 $status = [ordered]@{
     Installed = (Test-Path -LiteralPath $installation)
     Version = $null; TaskState = 'Not registered'; RunningInstances = $null
@@ -18,7 +18,7 @@ if ($status.Installed) {
 try {
     $scheduler = New-Object -ComObject 'Schedule.Service'
     $scheduler.Connect()
-    $task = $scheduler.GetFolder('\').GetTask('Vmnet8Sync-AfterConfigWrite')
+    $task = $scheduler.GetFolder('\').GetTask('VmnetSync-AfterConfigWrite')
     $states = @('Unknown', 'Disabled', 'Queued', 'Ready', 'Running')
     $status.TaskState = $states[[int]$task.State]
     $status.RunningInstances = $task.GetInstances(0).Count
@@ -34,7 +34,7 @@ if (Test-Path -LiteralPath $resultFile) {
     catch { $status.LastResult = [pscustomobject]@{ Status='Unreadable'; Reason=$_.Exception.Message } }
 }
 if ($Json) { [pscustomobject]$status | ConvertTo-Json -Depth 10; return }
-Write-Host 'VMnet8 Sync' -ForegroundColor Cyan
+Write-Host 'VMnet Sync' -ForegroundColor Cyan
 Write-Host "Installed: $($status.Installed)    Version: $($status.Version)"
 Write-Host "Task: $($status.TaskState)    Running workers: $($status.RunningInstances)"
 Write-Host "Event-only configuration: $($status.EventOnly)"

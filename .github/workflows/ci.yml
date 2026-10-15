@@ -18,6 +18,8 @@ jobs:
         run: |
           & .\Test-Worker.ps1
           & .\Test-Setup.ps1
+          & .\Test-Migration.ps1
+          & .\Test-Renewal.ps1
       - name: Build packages
         shell: powershell
         run: |
@@ -25,5 +27,5 @@ jobs:
           & .\Test-Package.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: vmnet8-sync-packages
+          name: vmnet-sync-packages
           path: dist/*

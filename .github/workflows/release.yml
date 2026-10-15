@@ -24,11 +24,13 @@ jobs:
           }
           & .\Test-Worker.ps1
           & .\Test-Setup.ps1
+          & .\Test-Migration.ps1
+          & .\Test-Renewal.ps1
           & .\Build.ps1
           & .\Test-Package.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: vmnet8-sync-release
+          name: vmnet-sync-release
           path: dist/*
       - name: Publish tag release
         if: startsWith(github.ref, 'refs/tags/')
@@ -38,4 +40,4 @@ jobs:
         run: |
           $assets = @(Get-ChildItem .\dist\*.zip | ForEach-Object { $_.FullName })
           $assets += (Resolve-Path .\dist\SHA256SUMS.txt).Path
-          gh release create $env:GITHUB_REF_NAME --verify-tag --prerelease --title "VMnet8 Sync $env:GITHUB_REF_NAME" --notes-file .\CHANGELOG.md @assets
+          gh release create $env:GITHUB_REF_NAME --verify-tag --prerelease --title "VMnet Sync $env:GITHUB_REF_NAME" --notes-file .\CHANGELOG.md @assets

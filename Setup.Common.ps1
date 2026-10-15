@@ -65,8 +65,9 @@ function Wait-WorkerExit([string]$TaskName) {
     }
 }
 
-function Assert-InstallManifest($Manifest, [string]$ConfigDirectory) {
-    if ($Manifest.TaskName -ne 'Vmnet8Sync-AfterConfigWrite' -or $Manifest.Version -notin @(1,2) -or
+function Assert-InstallManifest($Manifest, [string]$ConfigDirectory, [string]$ExpectedTaskName='VmnetSync-AfterConfigWrite') {
+    if ($ExpectedTaskName -notin @('VmnetSync-AfterConfigWrite','Vmnet8Sync-AfterConfigWrite')) { throw 'Invalid expected task name.' }
+    if ($Manifest.TaskName -ne $ExpectedTaskName -or $Manifest.Version -notin @(1,2) -or
         $Manifest.ConfigDirectory -ine $ConfigDirectory -or $null -eq $Manifest.AuditEntries) { throw 'Unexpected installation manifest; refusing to overwrite it.' }
     $targets = @(Get-ConfigAuditTargets $ConfigDirectory)
     if ($Manifest.Version -eq 1) { $targets = @($targets | Where-Object { -not $_.PSObject.Properties['Kind'] }) }
@@ -75,5 +76,64 @@ function Assert-InstallManifest($Manifest, [string]$ConfigDirectory) {
         $entries = @($Manifest.AuditEntries | Where-Object { $_.Path -ieq $target.Path })
         if ($entries.Count -ne 1 -or $null -eq $entries[0].AddedRights -or
             ([int]$entries[0].AddedRights -band (-bnot [int]$target.Rights)) -ne 0) { throw 'Unexpected audit entry in installation manifest.' }
+    }
+}
+
+function Move-LegacyInstallation([string]$ConfigDirectory, [string]$Destination, [string]$DataDirectory,
+    [string]$LegacyDestination=(Join-Path $env:ProgramFiles 'Vmnet8Sync'),
+    [string]$LegacyData=(Join-Path $env:ProgramData 'Vmnet8Sync')) {
+    $legacyManifest=Join-Path $LegacyDestination 'installation.json'
+    if (-not (Test-Path -LiteralPath $legacyManifest)) { return $null }
+    if ((Test-Path -LiteralPath $Destination) -or (Test-Path -LiteralPath $DataDirectory)) {
+        throw 'Both legacy and new product directories exist. Uninstall the legacy installation before proceeding.'
+    }
+    Assert-ManagedDirectory $LegacyDestination
+    Assert-ManagedDirectory $LegacyData
+    $bytes=[IO.File]::ReadAllBytes($legacyManifest)
+    $manifest=[Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xfeff) | ConvertFrom-Json
+    Assert-InstallManifest $manifest $ConfigDirectory 'Vmnet8Sync-AfterConfigWrite'
+    $task=Get-ScheduledTask -TaskName $manifest.TaskName -ErrorAction SilentlyContinue
+    $migration=[pscustomobject]@{Destination=$Destination;DataDirectory=$DataDirectory;LegacyDestination=$LegacyDestination;LegacyData=$LegacyData;Manifest=$bytes;TaskName=$manifest.TaskName;TaskXml=$null;TaskEnabled=$false;ProgramMoved=$false;DataMoved=$false;TaskRemoved=$false}
+    try {
+        if ($task) {
+            $migration.TaskXml=Export-ScheduledTask -TaskName $manifest.TaskName
+            $migration.TaskEnabled=$task.Settings.Enabled
+            Disable-ScheduledTask -TaskName $manifest.TaskName | Out-Null
+            Wait-WorkerExit $manifest.TaskName
+        }
+        # Move only these explicitly selected, validated product directories.
+        Move-Item -LiteralPath $LegacyDestination -Destination $Destination
+        $migration.ProgramMoved=$true
+        if (Test-Path -LiteralPath $LegacyData) {
+            Move-Item -LiteralPath $LegacyData -Destination $DataDirectory
+            $migration.DataMoved=$true
+        }
+        $manifest.TaskName='VmnetSync-AfterConfigWrite'
+        [IO.File]::WriteAllText((Join-Path $Destination 'installation.json'),($manifest | ConvertTo-Json -Depth 8))
+        return $migration
+    } catch { Undo-LegacyMigration $migration; throw }
+}
+
+function Undo-LegacyMigration($Migration) {
+    if ($null -eq $Migration) { return }
+    if ($Migration.ProgramMoved) {
+        [IO.File]::WriteAllBytes((Join-Path $Migration.Destination 'installation.json'),$Migration.Manifest)
+        Move-Item -LiteralPath $Migration.Destination -Destination $Migration.LegacyDestination
+    }
+    if ($Migration.DataMoved) { Move-Item -LiteralPath $Migration.DataDirectory -Destination $Migration.LegacyData }
+    elseif (Test-Path -LiteralPath $Migration.DataDirectory) {
+        # Setup may have created a fresh data directory when the legacy data
+        # directory was missing. An empty leftover would block the next upgrade.
+        Assert-ManagedDirectory $Migration.DataDirectory
+        if (@(Get-ChildItem -LiteralPath $Migration.DataDirectory -Force).Count -eq 0) { Remove-Item -LiteralPath $Migration.DataDirectory }
+    }
+    if ($Migration.TaskRemoved) { [void](Register-ScheduledTask -TaskName $Migration.TaskName -Xml $Migration.TaskXml -Force) }
+    if ($Migration.TaskEnabled) { Enable-ScheduledTask -TaskName $Migration.TaskName | Out-Null }
+}
+
+function Complete-LegacyMigration($Migration) {
+    if ($null -ne $Migration -and $null -ne $Migration.TaskXml) {
+        Unregister-ScheduledTask -TaskName $Migration.TaskName -Confirm:$false
+        $Migration.TaskRemoved=$true
     }
 }

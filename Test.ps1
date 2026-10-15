@@ -115,8 +115,8 @@ Test-Case 'Stopped services are not reported as synchronized' {
 Test-Case 'Audit policy helper compiles without enabling privileges or modifying policy' {
     $source = [IO.File]::ReadAllText("$PSScriptRoot\Audit.ps1")
     $csharp = [regex]::Match($source, "(?s)Add-Type -TypeDefinition @'\r?\n(.*?)\r?\n'@").Groups[1].Value
-    if (-not ('Vmnet8Sync.AuditNative' -as [type])) { Add-Type -TypeDefinition $csharp }
-    Assert-Equal $true ($null -ne ('Vmnet8Sync.AuditNative' -as [type]))
+    if (-not ('VmnetSync.AuditNative' -as [type])) { Add-Type -TypeDefinition $csharp }
+    Assert-Equal $true ($null -ne ('VmnetSync.AuditNative' -as [type]))
 }
 Test-Case 'Existing audit rights are preserved through add/remove' {
     $acl = [Security.AccessControl.FileSecurity]::new()
@@ -132,7 +132,7 @@ Test-Case 'Existing audit rights are preserved through add/remove' {
     Assert-Equal ([int][Security.AccessControl.FileSystemRights]::WriteData) (Get-ExistingAuditRights $acl $original)
 }
 Test-Case 'Task filters configuration writes and VMware replacement, not DHCP lease rotation' {
-    [xml]$taskXml=New-SyncTaskXml 'C:\ProgramData\VMware' 'C:\Program Files\Vmnet8Sync\Sync.ps1' @('C:\VMware-Test\vmnetcfg.exe')
+    [xml]$taskXml=New-SyncTaskXml 'C:\ProgramData\VMware' 'C:\Program Files\VmnetSync\Sync.ps1' @('C:\VMware-Test\vmnetcfg.exe')
     [xml]$query=$taskXml.Task.Triggers.EventTrigger.Subscription
     $eventXPath=$query.QueryList.Query.Select[0].InnerText
     # band() is a Windows Event Log XPath extension, unavailable in XmlDocument.
@@ -164,7 +164,7 @@ Test-Case 'Windows Task Scheduler accepts the definition without task registrati
     $scheduler = New-Object -ComObject 'Schedule.Service'
     $scheduler.Connect()
     $definition = $scheduler.NewTask(0)
-    $definition.XmlText = New-SyncTaskXml 'C:\ProgramData\VMware' 'C:\Program Files\Vmnet8Sync\Sync.ps1' @('C:\VMware-Test\vmnetcfg.exe')
+    $definition.XmlText = New-SyncTaskXml 'C:\ProgramData\VMware' 'C:\Program Files\VmnetSync\Sync.ps1' @('C:\VMware-Test\vmnetcfg.exe')
     # Verify Windows' interpreted settings: only a configuration event can launch
     # the worker, with no boot/logon/timer trigger, catch-up run or wake-up.
     Assert-Equal 1 $definition.Triggers.Count
@@ -179,7 +179,7 @@ Test-Case 'Windows Task Scheduler accepts the definition without task registrati
     Assert-Equal 'S-1-5-18' $identity
 }
 Test-Case 'Windows Event Log accepts the write-only event query including band extension' {
-    [xml]$taskXml=New-SyncTaskXml 'C:\ProgramData\VMware' 'C:\Program Files\Vmnet8Sync\Sync.ps1' @('C:\VMware-Test\vmnetcfg.exe')
+    [xml]$taskXml=New-SyncTaskXml 'C:\ProgramData\VMware' 'C:\Program Files\VmnetSync\Sync.ps1' @('C:\VMware-Test\vmnetcfg.exe')
     [xml]$query=$taskXml.Task.Triggers.EventTrigger.Subscription
     # Validate on the readable Application log; no Security-log access or writes.
     $eventQuery=[Diagnostics.Eventing.Reader.EventLogQuery]::new('Application', [Diagnostics.Eventing.Reader.PathType]::LogName, $query.OuterXml.Replace('Path="Security"', 'Path="Application"').Replace("Path='Security'", "Path='Application'"))

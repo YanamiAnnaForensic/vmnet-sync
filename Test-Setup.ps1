@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 $ErrorActionPreference = 'Stop'
-$testRoot = Join-Path ([IO.Path]::GetTempPath()) ('vmnet8-sync-tests-' + [Guid]::NewGuid().ToString('N'))
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) ('vmnet-sync-tests-' + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $testRoot)
 $fixture = Join-Path $testRoot 'package with spaces'
 [void](New-Item -ItemType Directory -Path $fixture)
@@ -40,6 +40,9 @@ function Assert-ManagedDirectory($Path) {
 }
 function New-ManagedDirectory($Path) { Assert-ManagedDirectory $Path; if (-not (Test-Path -LiteralPath $Path)) { [void](New-Item -ItemType Directory -Path $Path) } }
 function Initialize-AuditNative { }
+function Move-LegacyInstallation { return $null }
+function Complete-LegacyMigration { }
+function Undo-LegacyMigration { }
 function Get-TestAuditFlags { return $script:policy }
 function Set-TestAuditFlags($Value) { $script:policy=[int]$Value }
 function Get-TestRegistryAuditFlags { return $script:registryPolicy }
@@ -71,14 +74,14 @@ function Write-FixtureScript([string]$Name) {
     $source=[regex]::Replace($source, '(?m)^\$admin = .*$', '$admin = $true')
     foreach ($assignment in @(
         @{Old="`$config = Join-Path `$env:ProgramData 'VMware'"; New="`$config = `$script:configPath"},
-        @{Old="`$destination = Join-Path `$env:ProgramFiles 'Vmnet8Sync'"; New="`$destination = `$script:programPath"},
-        @{Old="`$dataDirectory = Join-Path `$env:ProgramData 'Vmnet8Sync'"; New="`$dataDirectory = `$script:dataPath"},
+        @{Old="`$destination = Join-Path `$env:ProgramFiles 'VmnetSync'"; New="`$destination = `$script:programPath"},
+        @{Old="`$dataDirectory = Join-Path `$env:ProgramData 'VmnetSync'"; New="`$dataDirectory = `$script:dataPath"},
         @{Old="(Join-Path `$env:ProgramData 'VMware')"; New='($script:configPath)'},
-        @{Old='[Vmnet8Sync.AuditNative]::GetFlags()'; New='(Get-TestAuditFlags)'},
-        @{Old='[Vmnet8Sync.AuditNative]::SetFlags('; New='Set-TestAuditFlags ('},
-        @{Old='[Vmnet8Sync.AuditNative]::GetRegistryFlags()'; New='(Get-TestRegistryAuditFlags)'},
-        @{Old='[Vmnet8Sync.AuditNative]::SetRegistryFlags('; New='Set-TestRegistryAuditFlags ('},
-        @{Old='Global\Vmnet8Sync.Setup'; New=('Local\Vmnet8Sync.Test.' + [Guid]::NewGuid().ToString('N'))}
+        @{Old='[VmnetSync.AuditNative]::GetFlags()'; New='(Get-TestAuditFlags)'},
+        @{Old='[VmnetSync.AuditNative]::SetFlags('; New='Set-TestAuditFlags ('},
+        @{Old='[VmnetSync.AuditNative]::GetRegistryFlags()'; New='(Get-TestRegistryAuditFlags)'},
+        @{Old='[VmnetSync.AuditNative]::SetRegistryFlags('; New='Set-TestRegistryAuditFlags ('},
+        @{Old='Global\VmnetSync.Setup'; New=('Local\VmnetSync.Test.' + [Guid]::NewGuid().ToString('N'))}
     )) { $source=$source.Replace($assignment.Old,$assignment.New) }
     $source=$source.Replace('$ownsMutex = $false', ('$ownsMutex = $false' + "`r`n" + $mockCode))
     [IO.File]::WriteAllText((Join-Path $fixture $Name),$source)
@@ -162,6 +165,20 @@ try {
         Assert-Equal 2 (Read-ValidBaseline (Join-Path $script:dataPath 'baseline.json')).Version
         Assert-Equal 0 $script:started
     }
+    Test-Case 'Upgrade resnapshots legacy text fingerprints without starting or inspecting adapters' {
+        $legacyBaselinePath=Join-Path $script:dataPath 'baseline.json'
+        Write-JsonAtomic $legacyBaselinePath ([pscustomobject]@{Version=2;Networks=@()})
+        . (Join-Path $fixture 'Install.ps1') | Out-Null
+        Assert-Equal 3 (Read-ValidBaseline $legacyBaselinePath).FingerprintVersion
+        Assert-Equal 0 $script:started
+    }
+    Test-Case 'Upgrade resnapshots fingerprints that omitted registry masks without starting a worker' {
+        $legacyBaselinePath=Join-Path $script:dataPath 'baseline.json'
+        Write-JsonAtomic $legacyBaselinePath ([pscustomobject]@{Version=2;FingerprintVersion=2;Networks=@()})
+        . (Join-Path $fixture 'Install.ps1') | Out-Null
+        Assert-Equal 3 (Read-ValidBaseline $legacyBaselinePath).FingerprintVersion
+        Assert-Equal 0 $script:started
+    }
     Test-Case 'Uninstall removes known product files and task, retains diagnostics and audit policy' {
         Write-FixtureScript 'Uninstall.ps1'
         [IO.File]::WriteAllText((Join-Path $script:dataPath 'last-result.json'),'{"Status":"fixture"}')
@@ -183,6 +200,6 @@ try {
     # Delete only the resolved, uniquely created fixture under the system temp dir.
     $resolved=[IO.Path]::GetFullPath($testRoot)
     $temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
-    if (-not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike 'vmnet8-sync-tests-*') { throw 'Unexpected test cleanup path.' }
+    if (-not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notlike 'vmnet-sync-tests-*') { throw 'Unexpected test cleanup path.' }
     Remove-Item -LiteralPath $resolved -Recurse -Force
 }

@@ -31,7 +31,7 @@ Test-Case 'Registry audit rights are added and removed without removing existing
     Assert-Equal 1 (Get-ExistingAuditRights $acl $original)
 }
 Test-Case 'Registry event queries cover configured slots and never match reads or unrelated keys' {
-    [xml]$task=New-SyncTaskXml 'C:\ProgramData\VMware' 'C:\Program Files\Vmnet8Sync\Sync.ps1' @('C:\VMware\vmnetcfg.exe')
+    [xml]$task=New-SyncTaskXml 'C:\ProgramData\VMware' 'C:\Program Files\VmnetSync\Sync.ps1' @('C:\VMware\vmnetcfg.exe')
     [xml]$query=$task.Task.Triggers.EventTrigger.Subscription
     Assert-Equal 21 @($query.QueryList.Query.Select).Count
     $prefix='\REGISTRY\MACHINE\SOFTWARE\WOW6432Node\VMware, Inc.\VMnetLib\VMnetConfig'
@@ -53,10 +53,10 @@ $multiFixture=Join-Path ([IO.Path]::GetTempPath()) ('vmnet-multi-tests-'+[guid]:
 [void](New-Item -ItemType Directory -Path $multiFixture)
 function New-Inventory {
     @(
-        [pscustomobject][ordered]@{Id='VMnet0';Configured=$false;AdapterEnabled=$false;DhcpEnabled=$false;NatEnabled=$false;Subnet='';Gateway=''},
-        [pscustomobject][ordered]@{Id='VMnet1';Configured=$true;AdapterEnabled=$true;DhcpEnabled=$true;NatEnabled=$false;Subnet='192.168.93.0';Gateway=''},
-        [pscustomobject][ordered]@{Id='VMnet8';Configured=$true;AdapterEnabled=$true;DhcpEnabled=$true;NatEnabled=$true;Subnet='192.168.36.0';Gateway='192.168.36.2'},
-        [pscustomobject][ordered]@{Id='VMnet19';Configured=$false;AdapterEnabled=$false;DhcpEnabled=$false;NatEnabled=$false;Subnet='';Gateway=''}
+        [pscustomobject][ordered]@{Id='VMnet0';Configured=$false;AdapterEnabled=$false;DhcpEnabled=$false;NatEnabled=$false;Subnet='';SubnetMask='';Gateway=''},
+        [pscustomobject][ordered]@{Id='VMnet1';Configured=$true;AdapterEnabled=$true;DhcpEnabled=$true;NatEnabled=$false;Subnet='192.168.93.0';SubnetMask='';Gateway=''},
+        [pscustomobject][ordered]@{Id='VMnet8';Configured=$true;AdapterEnabled=$true;DhcpEnabled=$true;NatEnabled=$true;Subnet='192.168.36.0';SubnetMask='';Gateway='192.168.36.2'},
+        [pscustomobject][ordered]@{Id='VMnet19';Configured=$false;AdapterEnabled=$false;DhcpEnabled=$false;NatEnabled=$false;Subnet='';SubnetMask='';Gateway=''}
     )
 }
 function Read-VMnetInventory { return $script:fixtureInventory }
@@ -112,6 +112,24 @@ try {
         Reset-MultiFixture; $script:fixtureInventory[1].Subnet='192.168.99.0'
         Assert-Equal 'Blocked' (Read-NetworkFiles $multiFixture).Networks[1].Disposition
     }
+    Test-Case 'Registry mask inconsistent with DHCP is blocked while valid sibling remains ready' {
+        Reset-MultiFixture; $script:fixtureInventory[1].SubnetMask='255.255.254.0'
+        $snapshot=Read-NetworkFiles $multiFixture
+        Assert-Equal 'Blocked' $snapshot.Networks[1].Disposition
+        Assert-Equal 'Registry and DHCP subnet masks disagree; configuration may still be changing.' $snapshot.Networks[1].Reason
+        Assert-Equal 'Ready' $snapshot.Networks[2].Disposition
+    }
+    Test-Case 'Mask-only registry edit is detected and a consistent explicit mask is accepted' {
+        Reset-MultiFixture; $baseline=New-ConfigBaseline (Read-NetworkFiles $multiFixture)
+        $script:fixtureInventory[1].SubnetMask='255.255.255.0'
+        $changed=@(Get-ChangedNetworks (Read-NetworkFiles $multiFixture) $baseline)
+        Assert-Equal 1 $changed.Count; Assert-Equal 'VMnet1' $changed[0].Id
+        Assert-Equal 'Ready' $changed[0].Disposition
+    }
+    Test-Case 'Noncontiguous registry mask is rejected before inspecting the adapter' {
+        Reset-MultiFixture; $script:fixtureInventory[1].SubnetMask='255.0.255.0'
+        Assert-Equal 'Blocked' (Read-NetworkFiles $multiFixture).Networks[1].Disposition
+    }
     Test-Case 'Overlapping VMnet subnets are blocked' {
         Reset-MultiFixture; $script:fixtureInventory[1].Subnet='192.168.36.0'
         $overlap=[regex]::Replace($dhcp,'(?s)subnet 192\.168\.93\.0.*?\}', '').Replace('192.168.93.1','192.168.36.10')
@@ -119,6 +137,16 @@ try {
         $snapshot=Read-NetworkFiles $multiFixture
         Assert-Equal 2 @($snapshot.Networks | Where-Object { $_.Disposition -eq 'Blocked' }).Count
         Assert-Equal $true $snapshot.Networks[1].Reason.StartsWith('Overlapping configured subnets:')
+    }
+    Test-Case 'VMware rewriting line endings and indentation does not select unchanged networks' {
+        Reset-MultiFixture; $baseline=New-ConfigBaseline (Read-NetworkFiles $multiFixture)
+        foreach ($file in @('vmnetdhcp.conf','vmnetnat.conf')) {
+            $path=Join-Path $multiFixture $file
+            $text=[IO.File]::ReadAllText($path).Replace("`r`n","`n")
+            $text=[regex]::Replace($text,'(?m)^[ \t]+','        ')
+            [IO.File]::WriteAllText($path,$text)
+        }
+        Assert-Equal 0 @(Get-ChangedNetworks (Read-NetworkFiles $multiFixture) $baseline).Count
     }
     Test-Case 'Removed networks are reported as skipped' {
         Reset-MultiFixture; $baseline=New-ConfigBaseline (Read-NetworkFiles $multiFixture)
@@ -136,10 +164,10 @@ try {
     }
     Test-Case 'Invalid baseline identities and duplicate networks are rejected' {
         $path=Join-Path $multiFixture 'invalid.json'
-        Write-JsonAtomic $path ([pscustomobject]@{Version=2;Networks=@([pscustomobject]@{Id='PhysicalEthernet';Fingerprint=(Get-TextHash 'test')})})
+        Write-JsonAtomic $path ([pscustomobject]@{Version=2;FingerprintVersion=3;Networks=@([pscustomobject]@{Id='PhysicalEthernet';Fingerprint=(Get-TextHash 'test')})})
         Assert-Throws { Read-ValidBaseline $path }
         $entry=[pscustomobject]@{Id='VMnet1';Fingerprint=(Get-TextHash 'test')}
-        Write-JsonAtomic $path ([pscustomobject]@{Version=2;Networks=@($entry,$entry)})
+        Write-JsonAtomic $path ([pscustomobject]@{Version=2;FingerprintVersion=3;Networks=@($entry,$entry)})
         Assert-Throws { Read-ValidBaseline $path }
     }
 } finally {

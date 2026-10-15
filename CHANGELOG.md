@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 — 2026-10-15 (preview)
+
+- Rename the product, packages, task, runtime directories and repository to VMnet Sync / vmnet-sync; migrate legacy Vmnet8Sync installations with rollback.
+- Normalize whitespace in per-network fingerprints and reinitialize old-format baselines without starting a worker; VMware Apply no longer selects untouched networks because it rewrites line endings.
+- Fix real cross-subnet DHCP repair: an ACK/exit code 0 can retain the old lease, so the bounded retry releases only the target lease before requesting a new reservation. A release failure still attempts recovery renewal.
+- Complete local original-UI and stale-lease repair acceptance for VMnet1/8, custom VMnet3 /23, host/DHCP opt-outs, event-only idle exit, real failed-upgrade rollback and uninstall/reinstall. Restore original networks and remove temporary adapters.
+- Validate explicit registry subnet masks against DHCP, including mask-only edits and noncontiguous masks, before inspecting or changing adapters. Reinitialize old baselines during setup without starting a worker.
+- Preserve retry after a failed legacy migration when its diagnostics directory was missing.
+- Add migration, whitespace, mask and renewal regressions. See docs/validation.md for the tested environment and limits.
+
 ## 0.2.0 — 2026-10-15 (preview)
 
 - Discover configured VMnet0–19 from VMware registry flags; support host-only and custom NAT networks without assuming VMnet8, .1, .2 or /24.
@@ -17,7 +27,7 @@ Real VMware Apply → cross-subnet DHCP renewal remains to be validated. The int
 
 ## 0.1.0 — 2026-10-15
 
-Initial preview of VMnet8 Sync for Windows and VMware Workstation.
+Initial preview of VMnet Sync for Windows and VMware Workstation.
 
 - Double-click install, uninstall and status commands; automatic UAC elevation for setup.
 - Windows event-triggered synchronization, with no product service, boot/logon trigger or timer.
